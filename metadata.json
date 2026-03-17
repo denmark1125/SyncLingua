@@ -1,0 +1,5 @@
+{
+  "name": "SyncLingua",
+  "description": "AI 驅動的會議記錄與摘要工具。輕鬆錄音、轉錄並提取行動項目。",
+  "requestFramePermissions": ["microphone"]
+}

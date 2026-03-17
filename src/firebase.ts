@@ -1,7 +1,15 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { getFirestore, collection, doc, setDoc, getDoc, query, where, onSnapshot, orderBy, limit, addDoc, updateDoc, deleteDoc, Timestamp, getDocFromServer } from 'firebase/firestore';
-import firebaseConfig from '../firebase-applet-config.json';
+import rawFirebaseConfig from '../firebase-applet-config.json';
+
+// Merge static config with environment variables for sensitive data
+const firebaseConfig = {
+  ...rawFirebaseConfig,
+  // Prioritize environment variables for the API Key (Vercel/Vite support)
+  // @ts-ignore
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || rawFirebaseConfig.apiKey,
+};
 
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);

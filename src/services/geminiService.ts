@@ -32,6 +32,7 @@ export interface TranscriptionResult {
   transcript: string;
   summary: string;
   actionItems: string[];
+  modelInfo?: string;
 }
 
 export async function processMeetingAudio(audioBase64: string, mimeType: string): Promise<TranscriptionResult> {
@@ -99,7 +100,11 @@ export async function processMeetingAudio(audioBase64: string, mimeType: string)
       const content = response.choices[0].message.content;
       if (!content) throw new Error("GPT-4o 沒有回應");
       
-      return JSON.parse(content) as TranscriptionResult;
+      const result = JSON.parse(content) as TranscriptionResult;
+      return {
+        ...result,
+        modelInfo: "OpenAI (Whisper + GPT-4o)"
+      };
     } catch (error) {
       console.error("OpenAI 處理失敗，切換回 Gemini:", error);
       // Fallback to Gemini if OpenAI fails
@@ -159,7 +164,11 @@ export async function processMeetingAudio(audioBase64: string, mimeType: string)
   }
 
   try {
-    return JSON.parse(text) as TranscriptionResult;
+    const result = JSON.parse(text) as TranscriptionResult;
+    return {
+      ...result,
+      modelInfo: "Gemini 3 Flash"
+    };
   } catch (e) {
     console.error("解析 AI 回應失敗:", text);
     throw new Error("AI 回應格式錯誤");
@@ -195,7 +204,13 @@ export async function summarizeTranscript(transcript: string): Promise<Partial<T
         response_format: { type: "json_object" }
       });
       const content = response.choices[0].message.content;
-      if (content) return JSON.parse(content);
+      if (content) {
+        const result = JSON.parse(content);
+        return {
+          ...result,
+          modelInfo: "GPT-4o"
+        };
+      }
     } catch (error) {
       console.error("OpenAI 摘要失敗:", error);
     }
@@ -239,5 +254,9 @@ export async function summarizeTranscript(transcript: string): Promise<Partial<T
   const text = response.text;
   if (!text) throw new Error("AI 沒有回應");
   
-  return JSON.parse(text);
+  const result = JSON.parse(text);
+  return {
+    ...result,
+    modelInfo: "Gemini 3 Flash"
+  };
 }

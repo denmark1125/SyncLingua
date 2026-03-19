@@ -65,6 +65,7 @@ interface Meeting {
   transcript?: string;
   summary?: string;
   actionItems?: string[];
+  modelInfo?: string;
   status: 'recording' | 'processing' | 'completed' | 'error';
 }
 
@@ -207,6 +208,7 @@ export default function App() {
             transcript: result.transcript,
             summary: result.summary,
             actionItems: result.actionItems,
+            modelInfo: result.modelInfo,
             status: 'completed'
           });
         } catch (error) {
@@ -415,6 +417,12 @@ export default function App() {
                       <History className="w-4 h-4" />
                       {selectedMeeting.duration ? format(selectedMeeting.duration * 1000, 'mm:ss') : '--:--'}
                     </span>
+                    {selectedMeeting.modelInfo && (
+                      <span className="flex items-center gap-1.5 text-indigo-600 font-medium">
+                        <CheckCircle2 className="w-4 h-4" />
+                        AI: {selectedMeeting.modelInfo}
+                      </span>
+                    )}
                     <span className={cn(
                       "px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider",
                       selectedMeeting.status === 'completed' ? "bg-emerald-100 text-emerald-700" :

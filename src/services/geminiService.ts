@@ -3,20 +3,24 @@ import OpenAI from "openai";
 
 // Environment variable handling for both AI Studio and Vercel/Vite environments
 const getApiKey = (key: string): string | undefined => {
-  // @ts-ignore - Vite environment variables
-  const viteKey = import.meta.env[`VITE_${key}`];
-  if (viteKey) return viteKey;
-  
-  // Handle variations like VITE_GEMINI_API (from user screenshot)
+  // Check for Gemini specifically
   if (key === 'GEMINI_API_KEY') {
     // @ts-ignore
-    const altViteKey = import.meta.env.VITE_GEMINI_API;
-    if (altViteKey) return altViteKey;
+    const k = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API || import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API;
+    if (k) return k;
   }
-  
-  // Fallback to process.env for AI Studio environment
+
+  // Check for OpenAI specifically
+  if (key === 'OPENAI_API_KEY') {
+    // @ts-ignore
+    const k = process.env.OPENAI_API_KEY || import.meta.env.VITE_OPENAI_API_KEY;
+    if (k) return k;
+  }
+
+  // Fallback for other keys
   try {
-    return process.env[key];
+    // @ts-ignore
+    return import.meta.env[`VITE_${key}`] || process.env[key];
   } catch (e) {
     return undefined;
   }

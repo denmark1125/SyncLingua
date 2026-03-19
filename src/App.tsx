@@ -240,14 +240,29 @@ export default function App() {
         const base64Audio = (reader.result as string).split(',')[1];
         
         try {
-          const { transcript, modelInfo } = await transcribeAudio(base64Audio, 'audio/webm', hint);
+          const { transcript, modelInfo: tModel } = await transcribeAudio(base64Audio, 'audio/webm', hint);
           
-          await updateDoc(doc(db, 'meetings', meetingId), {
-            rawTranscript: transcript,
-            transcript: transcript, // Initially set transcript to raw
-            modelInfo: modelInfo,
-            status: 'completed'
-          });
+          // Automatically analyze the transcript for a complete record
+          try {
+            const analysis = await analyzeTranscript(transcript, hint);
+            await updateDoc(doc(db, 'meetings', meetingId), {
+              rawTranscript: transcript,
+              transcript: analysis.transcript,
+              summary: analysis.summary,
+              actionItems: analysis.actionItems,
+              modelInfo: `${tModel} + ${analysis.modelInfo}`,
+              status: 'completed'
+            });
+          } catch (analysisError) {
+            console.error('Analysis error:', analysisError);
+            // Fallback: just save the transcript if analysis fails
+            await updateDoc(doc(db, 'meetings', meetingId), {
+              rawTranscript: transcript,
+              transcript: transcript,
+              modelInfo: tModel,
+              status: 'completed'
+            });
+          }
         } catch (error) {
           console.error('Processing error:', error);
           await updateDoc(doc(db, 'meetings', meetingId), {

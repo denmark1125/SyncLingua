@@ -1,7 +1,37 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Inter:wght@100..900&display=swap');
 @import "tailwindcss";
+@plugin "../node_modules/@tailwindcss/typography";
 
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-serif: "Cormorant Garamond", serif;
+  
+  --color-forest: #5A5A40;
+  --color-wood: #8B7355;
+  --color-sage: #8A8A6A;
+  --color-terracotta: #A67C52;
+  --color-paper: #F5F5F0;
 }
+
+@layer utilities {
+  .writing-vertical {
+    writing-mode: vertical-rl;
+  }
+  .tracking-widest-xl {
+    letter-spacing: 0.3em;
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-paper text-forest font-sans antialiased;
+  }
+}
+
+.markdown-body {
+  @apply prose prose-stone max-w-none;
+  @apply prose-headings:font-serif prose-headings:text-forest prose-headings:font-bold;
+  @apply prose-p:text-forest/80 prose-p:leading-relaxed prose-p:font-serif prose-p:text-lg;
+  @apply prose-li:text-forest/80 prose-li:font-serif;
+}
+

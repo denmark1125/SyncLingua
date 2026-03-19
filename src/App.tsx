@@ -48,7 +48,7 @@ import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { format } from 'date-fns';
 import ReactMarkdown from 'react-markdown';
-import { processMeetingAudio } from './services/geminiService';
+import { transcribeAudio, analyzeTranscript } from './services/geminiService';
 
 // Utility for Tailwind classes
 function cn(...inputs: ClassValue[]) {
@@ -63,11 +63,47 @@ interface Meeting {
   date: Timestamp;
   duration?: number;
   transcript?: string;
+  rawTranscript?: string;
   summary?: string;
   actionItems?: string[];
   modelInfo?: string;
+  contextHint?: string;
   status: 'recording' | 'processing' | 'completed' | 'error';
 }
+
+// Logo Component - Abstract & Artistic
+const Logo = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 100 100" className={cn("w-12 h-12", className)} fill="none" xmlns="http://www.w3.org/2000/svg">
+    {/* Abstract sound wave / record concept */}
+    <circle cx="50" cy="50" r="45" className="stroke-wood/10" strokeWidth="0.5" />
+    <circle cx="50" cy="50" r="35" className="stroke-wood/20" strokeWidth="0.5" />
+    <circle cx="50" cy="50" r="25" className="stroke-wood/30" strokeWidth="0.5" />
+    
+    {/* Dynamic elements */}
+    <motion.path 
+      d="M30 50 Q 40 20, 50 50 T 70 50" 
+      className="stroke-forest" 
+      strokeWidth="2" 
+      strokeLinecap="round"
+      animate={{ d: ["M30 50 Q 40 20, 50 50 T 70 50", "M30 50 Q 40 80, 50 50 T 70 50", "M30 50 Q 40 20, 50 50 T 70 50"] }}
+      transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }}
+    />
+    <motion.path 
+      d="M35 50 Q 45 35, 50 50 T 65 50" 
+      className="stroke-terracotta" 
+      strokeWidth="1.5" 
+      strokeLinecap="round"
+      animate={{ d: ["M35 50 Q 45 35, 50 50 T 65 50", "M35 50 Q 45 65, 50 50 T 65 50", "M35 50 Q 45 35, 50 50 T 65 50"] }}
+      transition={{ repeat: Infinity, duration: 3, ease: "easeInOut", delay: 0.5 }}
+    />
+    <motion.circle 
+      cx="50" cy="50" r="4" 
+      className="fill-sage"
+      animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+      transition={{ repeat: Infinity, duration: 2 }}
+    />
+  </svg>
+);
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -78,6 +114,7 @@ export default function App() {
   const [recordingTime, setRecordingTime] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [contextHint, setContextHint] = useState('');
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -157,7 +194,7 @@ export default function App() {
 
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        await handleAudioProcessing(audioBlob);
+        await handleAudioProcessing(audioBlob, contextHint);
       };
 
       mediaRecorder.start();
@@ -176,7 +213,7 @@ export default function App() {
     }
   };
 
-  const handleAudioProcessing = async (audioBlob: Blob) => {
+  const handleAudioProcessing = async (audioBlob: Blob, hint?: string) => {
     if (!user) return;
     
     setIsProcessing(true);
@@ -187,6 +224,7 @@ export default function App() {
       title: `${format(new Date(), 'yyyy年MM月dd日 HH:mm')} 的會議`,
       date: Timestamp.now(),
       duration: recordingTime,
+      contextHint: hint,
       status: 'processing'
     };
 
@@ -202,13 +240,12 @@ export default function App() {
         const base64Audio = (reader.result as string).split(',')[1];
         
         try {
-          const result = await processMeetingAudio(base64Audio, 'audio/webm');
+          const { transcript, modelInfo } = await transcribeAudio(base64Audio, 'audio/webm', hint);
           
           await updateDoc(doc(db, 'meetings', meetingId), {
-            transcript: result.transcript,
-            summary: result.summary,
-            actionItems: result.actionItems,
-            modelInfo: result.modelInfo,
+            rawTranscript: transcript,
+            transcript: transcript, // Initially set transcript to raw
+            modelInfo: modelInfo,
             status: 'completed'
           });
         } catch (error) {
@@ -238,6 +275,36 @@ export default function App() {
     }
   };
 
+  const handleManualAnalysis = async () => {
+    if (!selectedMeeting || !selectedMeeting.rawTranscript) return;
+    
+    setIsProcessing(true);
+    try {
+      const result = await analyzeTranscript(selectedMeeting.rawTranscript, selectedMeeting.contextHint);
+      
+      await updateDoc(doc(db, 'meetings', selectedMeeting.id), {
+        transcript: result.transcript,
+        summary: result.summary,
+        actionItems: result.actionItems,
+        modelInfo: result.modelInfo,
+      });
+      
+      // Update local state for immediate feedback
+      setSelectedMeeting(prev => prev ? {
+        ...prev,
+        transcript: result.transcript,
+        summary: result.summary,
+        actionItems: result.actionItems,
+        modelInfo: result.modelInfo,
+      } : null);
+    } catch (error) {
+      console.error('Analysis error:', error);
+      alert('AI 分析失敗，請稍後再試。');
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   const filteredMeetings = meetings.filter(m => 
     m.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     m.summary?.toLowerCase().includes(searchQuery.toLowerCase())
@@ -245,11 +312,11 @@ export default function App() {
 
   if (!isAuthReady) {
     return (
-      <div className="min-h-screen bg-stone-50 flex items-center justify-center">
+      <div className="min-h-screen bg-paper flex items-center justify-center">
         <motion.div 
           animate={{ scale: [1, 1.1, 1] }}
           transition={{ repeat: Infinity, duration: 2 }}
-          className="w-12 h-12 bg-emerald-600 rounded-full"
+          className="w-12 h-12 bg-forest rounded-full"
         />
       </div>
     );
@@ -257,137 +324,186 @@ export default function App() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-[#E4E3E0] flex flex-col items-center justify-center p-6 font-sans">
+      <div className="min-h-screen bg-paper flex flex-col items-center justify-center p-6 font-sans overflow-hidden">
+        <div className="absolute inset-0 opacity-20 pointer-events-none">
+          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-sage blur-[120px] rounded-full" />
+          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-terracotta blur-[120px] rounded-full" />
+        </div>
+
         <motion.div 
-          initial={{ opacity: 0, y: 20 }}
+          initial={{ opacity: 0, y: 40 }}
           animate={{ opacity: 1, y: 0 }}
-          className="max-w-md w-full bg-white p-12 rounded-3xl shadow-xl border border-black/5 text-center"
+          transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
+          className="max-w-2xl w-full text-center relative z-10"
         >
-          <div className="w-20 h-20 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-8 shadow-lg shadow-indigo-600/20">
-            <Mic className="text-white w-10 h-10" />
-          </div>
-          <h1 className="text-4xl font-bold text-stone-900 mb-4 tracking-tight">SyncLingua</h1>
-          <p className="text-stone-500 mb-10 leading-relaxed">
-            AI 驅動的會議記錄與摘要工具。輕鬆錄音、轉錄並提取行動項目，讓溝通更高效。
+          <Logo className="mx-auto mb-12 w-24 h-24" />
+          <h1 className="text-8xl font-serif font-bold text-forest mb-8 tracking-tighter leading-[0.85]">
+            Sync<br /><span className="text-terracotta italic">Lingua</span>
+          </h1>
+          <p className="text-wood/80 mb-16 text-xl leading-relaxed font-serif italic max-w-lg mx-auto">
+            捕捉對話中的詩意與深度。將每一次會議轉化為具備敘事感的專業紀錄。
           </p>
-          <button 
-            onClick={loginWithGoogle}
-            className="w-full bg-stone-900 text-white py-4 rounded-2xl font-medium hover:bg-stone-800 transition-all flex items-center justify-center gap-3 shadow-lg shadow-black/10"
-          >
-            <UserIcon className="w-5 h-5" />
-            使用 Google 帳號登入
-          </button>
+          
+          <div className="flex flex-col items-center gap-6">
+            <button 
+              onClick={loginWithGoogle}
+              className="group relative px-12 py-5 bg-forest text-white rounded-full font-medium transition-all flex items-center gap-4 overflow-hidden shadow-2xl shadow-forest/20 hover:scale-105 active:scale-95"
+            >
+              <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-500" />
+              <UserIcon className="w-5 h-5 relative z-10" />
+              <span className="relative z-10 text-lg">使用 Google 帳號開啟旅程</span>
+            </button>
+            <div className="text-[10px] uppercase tracking-[0.3em] text-sage font-bold">
+              AI-Powered Narrative Intelligence
+            </div>
+          </div>
         </motion.div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#F5F5F0] flex font-sans text-stone-900">
+    <div className="min-h-screen bg-paper flex font-sans text-forest">
       {/* Sidebar */}
-      <aside className="w-80 bg-white border-r border-stone-200 flex flex-col h-screen sticky top-0">
-        <div className="p-6 border-bottom border-stone-100 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-600/10">
-              <Mic className="text-white w-5 h-5" />
+      <aside className="w-80 bg-white border-r border-wood/5 flex flex-col h-screen sticky top-0 z-20">
+        <div className="p-8 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <Logo className="w-10 h-10" />
+            <div className="flex flex-col">
+              <span className="font-serif font-bold text-2xl tracking-tighter text-forest leading-none">SyncLingua</span>
+              <span className="text-[8px] uppercase tracking-[0.4em] text-sage font-bold mt-1">Intelligence</span>
             </div>
-            <span className="font-bold text-xl tracking-tight">SyncLingua</span>
           </div>
         </div>
 
-        <div className="px-4 py-4">
+        <div className="px-6 py-4 space-y-4">
+          <div className="space-y-2">
+            <label className="text-[10px] uppercase tracking-widest text-sage font-bold px-1">會議背景提示 (選填)</label>
+            <input 
+              type="text" 
+              placeholder="例如：LIZ學堂、財經、職場防備..."
+              value={contextHint}
+              onChange={(e) => setContextHint(e.target.value)}
+              className="w-full px-4 py-3 bg-paper/30 border border-transparent focus:border-wood/10 rounded-xl text-xs focus:ring-0 transition-all placeholder:text-sage/40"
+            />
+          </div>
+
           <button 
             onClick={isRecording ? stopRecording : startRecording}
             disabled={isProcessing}
             className={cn(
-              "w-full py-4 rounded-2xl font-medium flex items-center justify-center gap-3 transition-all shadow-lg",
+              "w-full py-5 rounded-2xl font-medium flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden group",
               isRecording 
-                ? "bg-red-500 text-white shadow-red-500/20 animate-pulse" 
-                : "bg-indigo-600 text-white shadow-indigo-600/20 hover:bg-indigo-700",
+                ? "bg-terracotta text-white shadow-xl shadow-terracotta/20" 
+                : "bg-forest text-white shadow-xl shadow-forest/20 hover:bg-forest/90",
               isProcessing && "opacity-50 cursor-not-allowed"
             )}
           >
-            {isRecording ? <StopCircle className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-            {isRecording ? `停止錄音 (${format(recordingTime * 1000, 'mm:ss')})` : '開始新會議'}
+            <div className="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity" />
+            {isRecording ? (
+              <motion.div 
+                animate={{ scale: [1, 1.2, 1] }}
+                transition={{ repeat: Infinity, duration: 1.5 }}
+              >
+                <StopCircle className="w-6 h-6" />
+              </motion.div>
+            ) : <Mic className="w-6 h-6" />}
+            <span className="text-xs uppercase tracking-widest font-bold">
+              {isRecording ? `錄音中 ${format(recordingTime * 1000, 'mm:ss')}` : '啟動新會議錄製'}
+            </span>
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-2 py-4 space-y-1">
-          <div className="px-4 mb-2">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
+        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-8">
+          <div className="px-2">
+            <div className="relative group">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-sage group-focus-within:text-forest transition-colors" />
               <input 
                 type="text" 
-                placeholder="搜尋會議..."
+                placeholder="搜尋紀錄..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-stone-100 border-none rounded-xl text-sm focus:ring-2 focus:ring-indigo-600/20 transition-all"
+                className="w-full pl-12 pr-4 py-3 bg-paper/30 border border-transparent focus:border-wood/10 rounded-xl text-sm focus:ring-0 transition-all placeholder:text-sage/50"
               />
             </div>
           </div>
 
-          <div className="px-4 py-2 text-xs font-bold text-stone-400 uppercase tracking-widest">
-            最近的會議
-          </div>
-
-          {filteredMeetings.length === 0 ? (
-            <div className="px-4 py-8 text-center text-stone-400 text-sm italic">
-              尚無會議記錄
+          <div className="space-y-2">
+            <div className="px-4 text-[9px] font-bold text-sage/60 uppercase tracking-[0.3em] mb-4">
+              Archive / 會議存檔
             </div>
-          ) : (
-            filteredMeetings.map((meeting) => (
-              <button
-                key={meeting.id}
-                onClick={() => setSelectedMeeting(meeting)}
-                className={cn(
-                  "w-full text-left p-4 rounded-2xl transition-all group flex items-start gap-3",
-                  selectedMeeting?.id === meeting.id 
-                    ? "bg-indigo-50 text-indigo-900" 
-                    : "hover:bg-stone-50"
-                )}
-              >
-                <div className={cn(
-                  "mt-1 w-2 h-2 rounded-full shrink-0",
-                  meeting.status === 'completed' ? "bg-emerald-500" :
-                  meeting.status === 'processing' ? "bg-amber-500 animate-pulse" :
-                  meeting.status === 'error' ? "bg-red-500" : "bg-stone-300"
-                )} />
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate text-sm">{meeting.title}</div>
-                  <div className="text-xs text-stone-500 mt-1 flex items-center gap-2">
-                    <Clock className="w-3 h-3" />
-                    {format(meeting.date.toDate(), 'yyyy年MM月dd日')}
+
+            {filteredMeetings.length === 0 ? (
+              <div className="px-4 py-12 text-center text-sage/40 text-sm italic font-serif">
+                尚無會議紀錄
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {filteredMeetings.map((meeting) => (
+                  <div
+                    key={meeting.id}
+                    onClick={() => setSelectedMeeting(meeting)}
+                    className={cn(
+                      "w-full text-left p-4 rounded-xl transition-all group flex items-start gap-4 border border-transparent cursor-pointer",
+                      selectedMeeting?.id === meeting.id 
+                        ? "bg-paper border-wood/10 shadow-sm" 
+                        : "hover:bg-paper/40"
+                    )}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        setSelectedMeeting(meeting);
+                      }
+                    }}
+                  >
+                    <div className={cn(
+                      "mt-2 w-1.5 h-1.5 rounded-full shrink-0",
+                      meeting.status === 'completed' ? "bg-forest" :
+                      meeting.status === 'processing' ? "bg-terracotta animate-pulse" :
+                      meeting.status === 'error' ? "bg-red-400" : "bg-wood/20"
+                    )} />
+                    <div className="flex-1 min-w-0">
+                      <div className="font-serif font-bold truncate text-lg text-forest/90 leading-tight">{meeting.title}</div>
+                      <div className="text-[10px] text-wood/60 mt-1.5 flex items-center gap-2 uppercase tracking-wider font-bold">
+                        <Clock className="w-3 h-3" />
+                        {format(meeting.date.toDate(), 'yyyy.MM.dd')}
+                      </div>
+                    </div>
+                    <button 
+                      onClick={(e) => deleteMeeting(meeting.id, e)}
+                      className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-terracotta/10 hover:text-terracotta rounded-lg transition-all"
+                      aria-label="刪除會議"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
                   </div>
-                </div>
-                <button 
-                  onClick={(e) => deleteMeeting(meeting.id, e)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 transition-all"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </button>
-            ))
-          )}
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
-
-        <div className="p-4 border-t border-stone-100">
-          <div className="flex items-center gap-3 p-2 rounded-2xl bg-stone-50">
-            <img 
-              src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName}`} 
-              alt={user.displayName || 'User'} 
-              className="w-10 h-10 rounded-xl border border-white shadow-sm"
-              referrerPolicy="no-referrer"
-            />
+        <div className="p-6 border-t border-wood/5 bg-paper/20">
+          <div className="flex items-center gap-4">
+            <div className="relative">
+              <img 
+                src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName}`} 
+                alt={user.displayName || 'User'} 
+                className="w-11 h-11 rounded-full border-2 border-white shadow-md"
+                referrerPolicy="no-referrer"
+              />
+              <div className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-white rounded-full" />
+            </div>
             <div className="flex-1 min-w-0">
-              <div className="text-sm font-bold truncate">{user.displayName}</div>
-              <div className="text-xs text-stone-500 truncate">{user.email}</div>
+              <div className="text-sm font-bold text-forest truncate">{user.displayName}</div>
+              <div className="text-[9px] text-wood/60 truncate uppercase tracking-widest font-bold">{user.email}</div>
             </div>
             <button 
               onClick={logout}
-              className="p-2 hover:bg-stone-200 rounded-xl transition-all text-stone-500 hover:text-stone-900"
+              className="p-2.5 hover:bg-terracotta/10 rounded-xl transition-all text-wood hover:text-terracotta"
             >
-              <LogOut className="w-5 h-5" />
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         </div>
@@ -405,105 +521,174 @@ export default function App() {
               className="flex-1 flex flex-col overflow-hidden"
             >
               {/* Header */}
-              <header className="p-8 bg-white border-b border-stone-100 flex items-center justify-between">
-                <div>
-                  <h2 className="text-3xl font-bold tracking-tight">{selectedMeeting.title}</h2>
-                  <div className="flex items-center gap-4 mt-2 text-stone-500 text-sm">
-                    <span className="flex items-center gap-1.5">
-                      <Clock className="w-4 h-4" />
-                      {format(selectedMeeting.date.toDate(), 'MMMM d, yyyy • HH:mm')}
-                    </span>
-                    <span className="flex items-center gap-1.5">
-                      <History className="w-4 h-4" />
-                      {selectedMeeting.duration ? format(selectedMeeting.duration * 1000, 'mm:ss') : '--:--'}
-                    </span>
-                    {selectedMeeting.modelInfo && (
-                      <span className="flex items-center gap-1.5 text-indigo-600 font-medium">
-                        <CheckCircle2 className="w-4 h-4" />
-                        AI: {selectedMeeting.modelInfo}
-                      </span>
-                    )}
+              <header className="p-10 bg-white border-b border-wood/5 flex items-center justify-between relative overflow-hidden">
+                <div className="absolute top-0 right-0 w-64 h-64 bg-sage/5 blur-[100px] rounded-full -mr-32 -mt-32" />
+                
+                <div className="relative z-10">
+                  <div className="flex items-center gap-3 mb-4">
                     <span className={cn(
-                      "px-2.5 py-0.5 rounded-full text-xs font-bold uppercase tracking-wider",
-                      selectedMeeting.status === 'completed' ? "bg-emerald-100 text-emerald-700" :
-                      selectedMeeting.status === 'processing' ? "bg-amber-100 text-amber-700" :
-                      "bg-red-100 text-red-700"
+                      "px-4 py-1.5 rounded-full text-[9px] font-bold uppercase tracking-[0.2em] shadow-sm",
+                      selectedMeeting.status === 'completed' ? "bg-forest text-white" :
+                      selectedMeeting.status === 'processing' ? "bg-terracotta text-white animate-pulse" :
+                      "bg-red-500 text-white"
                     )}>
                       {selectedMeeting.status}
                     </span>
+                    <div className="h-px w-12 bg-wood/20" />
+                    <span className="text-[9px] font-bold uppercase tracking-[0.2em] text-sage">Session ID: {selectedMeeting.id.slice(0, 8)}</span>
+                  </div>
+                  
+                  <h2 className="text-6xl font-serif font-bold tracking-tighter text-forest leading-tight">{selectedMeeting.title}</h2>
+                  
+                  <div className="flex items-center gap-8 mt-6 text-wood/70 text-xs font-serif italic">
+                    <span className="flex items-center gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-sage" />
+                      {format(selectedMeeting.date.toDate(), 'yyyy年MM月dd日 • HH:mm')}
+                    </span>
+                    <span className="flex items-center gap-3">
+                      <div className="w-1.5 h-1.5 rounded-full bg-sage" />
+                      {selectedMeeting.duration ? format(selectedMeeting.duration * 1000, 'mm:ss') : '--:--'}
+                    </span>
+                    {selectedMeeting.modelInfo && (
+                      <span className="flex items-center gap-3 text-terracotta">
+                        <div className="w-1.5 h-1.5 rounded-full bg-terracotta" />
+                        Intelligence: {selectedMeeting.modelInfo}
+                      </span>
+                    )}
                   </div>
                 </div>
+                
                 <button 
                   onClick={() => setSelectedMeeting(null)}
-                  className="p-2 hover:bg-stone-100 rounded-full transition-all"
+                  className="p-4 hover:bg-paper rounded-2xl transition-all text-wood/40 hover:text-forest relative z-10"
                 >
-                  <X className="w-6 h-6" />
+                  <X className="w-8 h-8" />
                 </button>
               </header>
 
               {/* Content Grid */}
-              <div className="flex-1 overflow-y-auto p-8">
+              <div className="flex-1 overflow-y-auto p-10 lg:p-16 bg-paper/30">
                 {selectedMeeting.status === 'processing' ? (
                   <div className="h-full flex flex-col items-center justify-center text-center">
-                    <motion.div 
-                      animate={{ rotate: 360 }}
-                      transition={{ repeat: Infinity, duration: 2, ease: "linear" }}
-                      className="w-16 h-16 border-4 border-emerald-600 border-t-transparent rounded-full mb-6"
-                    />
-                    <h3 className="text-xl font-bold mb-2">正在轉錄您的會議...</h3>
-                    <p className="text-stone-500 max-w-sm">
-                      我們的 AI 正在處理音訊，生成逐字稿、摘要和行動項目。這通常需要一分鐘左右。
+                    <div className="relative mb-12">
+                      <motion.div 
+                        animate={{ rotate: 360 }}
+                        transition={{ repeat: Infinity, duration: 8, ease: "linear" }}
+                        className="w-32 h-32 border border-wood/10 rounded-full"
+                      />
+                      <motion.div 
+                        animate={{ rotate: -360 }}
+                        transition={{ repeat: Infinity, duration: 12, ease: "linear" }}
+                        className="absolute inset-0 w-32 h-32 border-t-2 border-forest rounded-full"
+                      />
+                      <div className="absolute inset-0 flex items-center justify-center">
+                        <Logo className="w-12 h-12" />
+                      </div>
+                    </div>
+                    <h3 className="text-4xl font-serif font-bold mb-4 text-forest">正在解構對話...</h3>
+                    <p className="text-wood/80 max-w-sm font-serif italic text-lg leading-relaxed">
+                      我們的 AI 正在捕捉每一個細微的音節與情感，這通常需要一分鐘左右的時間。
                     </p>
                   </div>
                 ) : selectedMeeting.status === 'error' ? (
                   <div className="h-full flex flex-col items-center justify-center text-center">
-                    <AlertCircle className="w-16 h-16 text-red-500 mb-6" />
-                    <h3 className="text-xl font-bold mb-2">發生錯誤</h3>
-                    <p className="text-stone-500 max-w-sm">
-                      處理此會議時遇到錯誤。請嘗試重新錄製。
+                    <div className="w-24 h-24 bg-red-50 rounded-full flex items-center justify-center mb-8">
+                      <AlertCircle className="w-12 h-12 text-red-500" />
+                    </div>
+                    <h3 className="text-4xl font-serif font-bold mb-4 text-forest">處理中斷</h3>
+                    <p className="text-wood/80 max-w-sm font-serif italic text-lg leading-relaxed">
+                      在轉譯此會議時遇到了一些技術障礙。請嘗試重新錄製或檢查您的網路連接。
                     </p>
                   </div>
                 ) : (
-                  <div className="max-w-5xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8">
-                    {/* Summary & Action Items */}
-                    <div className="lg:col-span-1 space-y-8">
-                      <section className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
-                        <div className="flex items-center gap-2 mb-4 text-indigo-600">
-                          <FileText className="w-5 h-5" />
-                          <h4 className="font-bold uppercase text-xs tracking-widest">摘要</h4>
+                  <div className="max-w-7xl mx-auto flex flex-col lg:flex-row gap-16">
+                    {/* Left Rail - Summary & Action Items */}
+                    <div className="lg:w-1/3 space-y-16">
+                      <section className="relative">
+                        <div className="absolute -left-8 top-0 writing-vertical text-[9px] font-bold uppercase tracking-[0.4em] text-sage/40 h-full flex items-center">
+                          Summary / 摘要
                         </div>
-                        <div className="prose prose-stone prose-sm">
-                          <ReactMarkdown>{selectedMeeting.summary || '尚無摘要。'}</ReactMarkdown>
+                        <div className="bg-white p-10 rounded-[40px] shadow-2xl shadow-forest/5 border border-wood/5 relative overflow-hidden">
+                          <div className="absolute top-0 right-0 p-6">
+                            <FileText className="w-6 h-6 text-terracotta/20" />
+                          </div>
+                          <div className="markdown-body">
+                            <ReactMarkdown>{selectedMeeting.summary || '尚無摘要。'}</ReactMarkdown>
+                          </div>
                         </div>
                       </section>
 
-                      <section className="bg-white p-6 rounded-3xl shadow-sm border border-stone-100">
-                        <div className="flex items-center gap-2 mb-4 text-indigo-600">
-                          <ListChecks className="w-5 h-5" />
-                          <h4 className="font-bold uppercase text-xs tracking-widest">行動項目</h4>
+                      <section className="relative">
+                        <div className="absolute -left-8 top-0 writing-vertical text-[9px] font-bold uppercase tracking-[0.4em] text-sage/40 h-full flex items-center">
+                          Actions / 行動
                         </div>
-                        <ul className="space-y-3">
-                          {selectedMeeting.actionItems?.map((item, i) => (
-                            <li key={i} className="flex items-start gap-3 text-sm">
-                              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 mt-0.5" />
-                              <span>{item}</span>
-                            </li>
-                          )) || <li className="text-stone-400 italic text-sm">未發現行動項目。</li>}
-                        </ul>
+                        <div className="bg-white p-10 rounded-[40px] shadow-2xl shadow-forest/5 border border-wood/5">
+                          <ul className="space-y-6">
+                            {selectedMeeting.actionItems?.map((item, i) => (
+                              <li key={i} className="flex items-start gap-5 group">
+                                <div className="w-6 h-6 rounded-full bg-sage/5 flex items-center justify-center shrink-0 mt-1 group-hover:bg-sage/20 transition-colors">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-sage" />
+                                </div>
+                                <span className="text-forest/80 font-serif text-lg leading-relaxed">{item}</span>
+                              </li>
+                            )) || <li className="text-sage/40 italic text-sm font-serif">未發現行動項目。</li>}
+                          </ul>
+                        </div>
                       </section>
                     </div>
 
-                    {/* Transcript */}
-                    <div className="lg:col-span-2">
-                      <section className="bg-white p-8 rounded-3xl shadow-sm border border-stone-100 h-full">
-                        <div className="flex items-center gap-2 mb-6 text-stone-400">
-                          <Mic className="w-5 h-5" />
-                          <h4 className="font-bold uppercase text-xs tracking-widest">精華會議紀錄</h4>
+                    {/* Right Content - Transcript */}
+                    <div className="lg:w-2/3 space-y-16">
+                      <section className="relative">
+                        <div className="absolute -right-8 top-0 writing-vertical text-[9px] font-bold uppercase tracking-[0.4em] text-sage/40 h-full flex items-center">
+                          Transcript / 紀錄
                         </div>
-                        <div className="whitespace-pre-wrap text-stone-700 leading-relaxed font-serif text-lg">
-                          {selectedMeeting.transcript || '紀錄內容為空。'}
+                        <div className="bg-white p-12 lg:p-16 rounded-[48px] shadow-2xl shadow-forest/5 border border-wood/5">
+                          <div className="flex items-center justify-between mb-12">
+                            <div className="flex items-center gap-4">
+                              <div className="w-10 h-10 rounded-2xl bg-paper flex items-center justify-center">
+                                <Mic className="w-5 h-5 text-forest" />
+                              </div>
+                              <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-forest">
+                                {selectedMeeting.summary ? '精華會議紀錄' : '原始逐字稿'}
+                              </h4>
+                            </div>
+                            {!selectedMeeting.summary && (
+                              <button 
+                                onClick={handleManualAnalysis}
+                                disabled={isProcessing}
+                                className="group relative px-10 py-4 bg-forest text-white rounded-full text-sm font-bold transition-all overflow-hidden shadow-2xl shadow-forest/20 hover:scale-105 active:scale-95"
+                              >
+                                <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-500" />
+                                <span className="relative z-10 flex items-center gap-3">
+                                  <Plus className="w-4 h-4" />
+                                  一鍵生成 AI 深度分析
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                          <div className="whitespace-pre-wrap text-forest/90 leading-[2] font-serif text-2xl tracking-tight">
+                            {selectedMeeting.transcript || '紀錄內容為空。'}
+                          </div>
                         </div>
                       </section>
+
+                      {selectedMeeting.summary && selectedMeeting.rawTranscript && (
+                        <section className="relative">
+                          <div className="absolute -right-8 top-0 writing-vertical text-[9px] font-bold uppercase tracking-[0.4em] text-sage/40 h-full flex items-center">
+                            Raw Data / 原始
+                          </div>
+                          <div className="bg-sage/5 p-12 rounded-[40px] border border-wood/10">
+                            <div className="flex items-center gap-4 mb-8">
+                              <History className="w-5 h-5 text-sage" />
+                              <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-sage">原始逐字稿備份</h4>
+                            </div>
+                            <div className="whitespace-pre-wrap text-wood/60 leading-relaxed text-base italic font-serif">
+                              {selectedMeeting.rawTranscript}
+                            </div>
+                          </div>
+                        </section>
+                      )}
                     </div>
                   </div>
                 )}
@@ -514,28 +699,39 @@ export default function App() {
               key="empty"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="flex-1 flex flex-col items-center justify-center p-12 text-center"
+              className="flex-1 flex flex-col items-center justify-center p-12 text-center relative overflow-hidden"
             >
-              <div className="w-32 h-32 bg-stone-200 rounded-full flex items-center justify-center mb-8">
-                <Mic className="text-stone-400 w-12 h-12" />
+              <div className="absolute inset-0 opacity-10 pointer-events-none">
+                <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-sage blur-[150px] rounded-full" />
+                <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-terracotta blur-[150px] rounded-full" />
               </div>
-              <h2 className="text-4xl font-bold tracking-tight mb-4">歡迎使用 SyncLingua</h2>
-              <p className="text-stone-500 max-w-lg text-lg leading-relaxed">
-                從側邊欄選擇一個會議來查看其逐字稿和摘要，或者開始一個新的錄音來捕捉您的下一次對話。
-              </p>
-              
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-16 w-full max-w-4xl">
-                {[
-                  { icon: Mic, title: '錄音', desc: '從任何設備捕捉清晰的音訊。' },
-                  { icon: FileText, title: '轉錄', desc: '在幾秒鐘內獲得準確的文本逐字稿。' },
-                  { icon: ListChecks, title: '分析', desc: 'AI 驅動的摘要和行動項目。' }
-                ].map((feature, i) => (
-                  <div key={i} className="bg-white p-8 rounded-3xl border border-stone-100 shadow-sm text-left">
-                    <feature.icon className="w-8 h-8 text-indigo-600 mb-4" />
-                    <h4 className="font-bold text-lg mb-2">{feature.title}</h4>
-                    <p className="text-stone-500 text-sm">{feature.desc}</p>
-                  </div>
-                ))}
+
+              <div className="relative z-10">
+                <div className="mb-16">
+                  <Logo className="w-48 h-48 mx-auto" />
+                </div>
+                <h2 className="text-8xl font-serif font-bold tracking-tighter mb-8 text-forest leading-none">
+                  Sync<span className="text-terracotta italic">Lingua</span>
+                </h2>
+                <p className="text-wood/70 max-w-xl text-2xl leading-relaxed font-serif italic mx-auto">
+                  捕捉對話中的靈魂。從側邊欄選擇一個會議，或啟動錄音來記錄您的下一個重要時刻。
+                </p>
+                
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-12 mt-24 w-full max-w-6xl">
+                  {[
+                    { icon: Mic, title: '捕捉聲音', desc: '以最高品質錄製您的每一場對話，不遺漏任何細節。' },
+                    { icon: FileText, title: '精準轉錄', desc: 'Whisper 模型確保逐字稿的完整與準確，捕捉語氣。' },
+                    { icon: ListChecks, title: '深度洞察', desc: 'GPT-4o 為您提取具備敘事感的會議精華與行動。' }
+                  ].map((feature, i) => (
+                    <div key={i} className="bg-white/50 backdrop-blur-sm p-12 rounded-[48px] border border-wood/5 shadow-xl shadow-forest/5 text-left hover:bg-white transition-all group">
+                      <div className="w-16 h-16 rounded-3xl bg-paper flex items-center justify-center mb-8 group-hover:bg-sage/10 transition-all">
+                        <feature.icon className="w-8 h-8 text-forest" />
+                      </div>
+                      <h4 className="font-serif font-bold text-2xl mb-4 text-forest">{feature.title}</h4>
+                      <p className="text-wood/80 text-lg leading-relaxed font-serif italic">{feature.desc}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
             </motion.div>
           )}
@@ -548,20 +744,41 @@ export default function App() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-stone-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-6"
+              className="fixed inset-0 bg-forest/40 backdrop-blur-xl z-50 flex items-center justify-center p-6"
             >
-              <div className="bg-white p-12 rounded-3xl shadow-2xl max-w-md w-full text-center">
+              <div className="bg-white p-20 rounded-[64px] shadow-2xl max-w-xl w-full text-center border border-wood/10 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-2 bg-paper">
+                  <motion.div 
+                    initial={{ x: '-100%' }}
+                    animate={{ x: '100%' }}
+                    transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                    className="w-full h-full bg-terracotta"
+                  />
+                </div>
+                
                 <motion.div 
-                  animate={{ scale: [1, 1.1, 1] }}
-                  transition={{ repeat: Infinity, duration: 2 }}
-                  className="w-20 h-20 bg-indigo-600 rounded-2xl flex items-center justify-center mx-auto mb-8"
+                  animate={{ scale: [1, 1.05, 1], rotate: [0, 5, -5, 0] }}
+                  transition={{ repeat: Infinity, duration: 4 }}
+                  className="w-32 h-32 bg-paper rounded-[40px] flex items-center justify-center mx-auto mb-12 shadow-inner"
                 >
-                  <Clock className="text-white w-10 h-10" />
+                  <Logo className="w-20 h-20" />
                 </motion.div>
-                <h3 className="text-2xl font-bold mb-4">正在處理音訊</h3>
-                <p className="text-stone-500 mb-0">
-                  我們正在使用 AI 轉錄並分析您的會議。這只需要一點時間。
+                
+                <h3 className="text-5xl font-serif font-bold mb-6 text-forest tracking-tight">正在編織紀錄...</h3>
+                <p className="text-wood/80 font-serif italic text-xl leading-relaxed">
+                  我們的 AI 正在將原始音訊轉化為精緻的文字紀錄。這是一個充滿藝術感的過程，請稍候。
                 </p>
+                
+                <div className="mt-12 flex justify-center gap-2">
+                  {[0, 1, 2].map(i => (
+                    <motion.div 
+                      key={i}
+                      animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }}
+                      transition={{ repeat: Infinity, duration: 1, delay: i * 0.2 }}
+                      className="w-2 h-2 rounded-full bg-sage"
+                    />
+                  ))}
+                </div>
               </div>
             </motion.div>
           )}

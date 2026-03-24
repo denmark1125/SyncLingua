@@ -1,23 +1,18 @@
-import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import OpenAI from "openai";
 
 // Environment variable handling for both AI Studio and Vercel/Vite environments
 const getApiKey = (key: string): string | undefined => {
-  // Check for Gemini specifically
   if (key === 'GEMINI_API_KEY') {
     // @ts-ignore
-    const k = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API || import.meta.env.VITE_GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API;
+    const k = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API || import.meta.env.VITE_GEMINI_API_KEY;
     if (k) return k;
   }
-
-  // Check for OpenAI specifically
   if (key === 'OPENAI_API_KEY') {
     // @ts-ignore
     const k = process.env.OPENAI_API_KEY || import.meta.env.VITE_OPENAI_API_KEY;
     if (k) return k;
   }
-
-  // Fallback for other keys
   try {
     // @ts-ignore
     return import.meta.env[`VITE_${key}`] || process.env[key];
@@ -30,7 +25,6 @@ const geminiApiKey = getApiKey('GEMINI_API_KEY');
 const openaiApiKey = getApiKey('OPENAI_API_KEY');
 
 let openaiInstance: OpenAI | null = null;
-
 let aiInstance: GoogleGenAI | null = null;
 
 function getGemini(): GoogleGenAI | null {
@@ -43,11 +37,9 @@ function getGemini(): GoogleGenAI | null {
 async function getOpenAI(): Promise<OpenAI | null> {
   if (openaiInstance) return openaiInstance;
   if (!openaiApiKey) return null;
-  
   try {
-    // Lazy initialization to avoid global side effects on load
-    openaiInstance = new OpenAI({ 
-      apiKey: openaiApiKey, 
+    openaiInstance = new OpenAI({
+      apiKey: openaiApiKey,
       dangerouslyAllowBrowser: true,
       fetch: (...args) => window.fetch(...args)
     });
@@ -67,61 +59,110 @@ export interface TranscriptionResult {
 }
 
 /**
- * Step 1: High-quality transcription only
+ * Whisper API hard limit: 25MB per request.
+ * This function checks if a blob exceeds the safe limit.
  */
-export async function transcribeAudio(audioBase64: string, mimeType: string, contextHint?: string): Promise<{ transcript: string, modelInfo: string }> {
-  // Try OpenAI Whisper first
+export const WHISPER_SAFE_SIZE_BYTES = 24 * 1024 * 1024; // 24MB safety margin
+
+/**
+ * Transcribe a single audio chunk (Blob → base64 internally).
+ * Suitable for both full recordings and chunked segments.
+ */
+export async function transcribeChunk(
+  audioBlob: Blob,
+  chunkIndex: number,
+  contextHint?: string
+): Promise<{ transcript: string; modelInfo: string }> {
+  if (audioBlob.size < 100) {
+    return { transcript: '', modelInfo: 'skipped (too small)' };
+  }
+
+  // Convert blob to base64
+  const base64Audio = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(audioBlob);
+    reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+    reader.onerror = reject;
+  });
+
+  const sanitizedMimeType = audioBlob.type.split(';')[0];
+
+  // --- OpenAI Whisper path ---
   const openai = await getOpenAI();
   if (openaiApiKey && openai) {
     try {
-      const byteCharacters = atob(audioBase64);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-      }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: mimeType });
-      const file = new File([blob], "recording.webm", { type: mimeType });
-
+      const file = new File([audioBlob], `chunk_${chunkIndex}.webm`, { type: sanitizedMimeType });
       const transcription = await openai.audio.transcriptions.create({
-        file: file,
-        model: "whisper-1",
-        language: "zh", // Hint for Chinese
-        prompt: `這是一段會議錄音。${contextHint ? `關鍵字與背景：${contextHint}。` : ""}請完整、準確地轉錄所有內容，特別注意專有名詞的正確性。`
-      });
+        file,
+        model: 'whisper-1',
+        prompt: `Segment ${chunkIndex + 1}. Transcription of a conversation (Chinese, English, etc.). ${contextHint ? `Context: ${contextHint}.` : ''}
+Format: Speaker: [HH:mm:ss] Content
+Example:
+A: [00:00:02] Hello
+B: [00:00:04] 你好
 
-      return { 
-        transcript: transcription.text, 
-        modelInfo: "OpenAI Whisper" 
-      };
+Rules:
+1. Keep original language. Do NOT translate.
+2. Keep numerical timestamps.
+3. If silent, return empty string. Never hallucinate.`
+      });
+      return { transcript: transcription.text, modelInfo: 'OpenAI Whisper' };
     } catch (error) {
-      console.error("Whisper 轉錄失敗:", error);
+      console.error(`Whisper chunk ${chunkIndex} failed:`, error);
+      // Fall through to Gemini
     }
   }
 
-  // Fallback to Gemini
+  // --- Gemini fallback ---
   const ai = getGemini();
-  if (!ai) throw new Error("API 金鑰缺失");
-  
-  const model = "gemini-3-flash-preview";
-  const prompt = `請完整且準確地轉錄這段音訊的所有對話內容。${contextHint ? `已知背景資訊：${contextHint}。請確保轉錄中的專有名詞與此資訊一致。` : ""}請直接輸出逐字稿，不要做摘要或修飾。使用繁體中文。`;
-  
-  const audioPart = {
-    inlineData: { mimeType, data: audioBase64 },
-  };
+  if (!ai) throw new Error('API 金鑰缺失');
 
   const response = await ai.models.generateContent({
-    model,
-    contents: { parts: [audioPart, { text: prompt }] },
+    model: 'gemini-3-flash-preview',
+    contents: {
+      parts: [
+        { inlineData: { mimeType: sanitizedMimeType, data: base64Audio } },
+        {
+          text: `TRANSCRIPTION TASK (Segment ${chunkIndex + 1}):
+1. Transcribe the audio. Distinguish speakers (A, B, C...).
+2. Include timestamps [HH:mm:ss]. Keep original language.
+3. Use Traditional Chinese (繁體中文) for Chinese speech.
+4. If silent or unintelligible, return empty string.
+5. DO NOT hallucinate or use templates.`
+        }
+      ]
+    },
+    config: {
+      systemInstruction: 'You are a professional audio transcription engine. Output only what is heard. For Chinese, use Traditional Chinese. If no clear speech, return empty string.'
+    }
   });
 
-  const text = response.text;
-  if (!text) throw new Error("Gemini 轉錄無回應");
+  return { transcript: response.text || '', modelInfo: 'Gemini 3 Flash' };
+}
 
-  return { 
-    transcript: text, 
-    modelInfo: "Gemini 3 Flash" 
-  };
+/**
+ * Merge multiple chunk transcripts into a single coherent transcript.
+ * Adjusts timestamps so they are cumulative across chunks.
+ */
+export function mergeChunkTranscripts(
+  chunkTranscripts: string[],
+  chunkDurationSeconds: number
+): string {
+  return chunkTranscripts
+    .map((transcript, i) => {
+      if (!transcript.trim()) return '';
+      const offsetSeconds = i * chunkDurationSeconds;
+      // Shift all [HH:mm:ss] timestamps by offset
+      return transcript.replace(/\[(\d{2}):(\d{2}):(\d{2})\]/g, (_match, hh, mm, ss) => {
+        const totalSecs = parseInt(hh) * 3600 + parseInt(mm) * 60 + parseInt(ss) + offsetSeconds;
+        const newH = Math.floor(totalSecs / 3600).toString().padStart(2, '0');
+        const newM = Math.floor((totalSecs % 3600) / 60).toString().padStart(2, '0');
+        const newS = (totalSecs % 60).toString().padStart(2, '0');
+        return `[${newH}:${newM}:${newS}]`;
+      });
+    })
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
@@ -132,102 +173,77 @@ export async function analyzeTranscript(transcript: string, contextHint?: string
   if (openaiApiKey && openai) {
     try {
       const response = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: 'gpt-4o',
         messages: [
           {
-            role: "system",
-            content: `您是一位頂級的 AI 會議助理。${contextHint ? `本次會議背景：${contextHint}。` : ""}請根據提供的原始逐字稿，生成一份極其詳盡、具備敘事感且結構嚴謹的『大師級會議紀錄』。請特別注意識別並保留正確的專有名詞（如公司名、人名、產品名）。`
+            role: 'system',
+            content: `您是一位專業且極具洞察力的會議秘書。${contextHint ? `本次對話背景：${contextHint}。` : ''}
+            
+**核心原則：**
+1. **嚴禁虛構內容**：僅根據提供的逐字稿進行分析。如果逐字稿不足以生成摘要，請在 summary 中說明「無法從音訊中提取足夠資訊進行分析」。
+2. **語言保持**：修飾後的逐字稿保持原始語言，不要翻譯。分析內容請使用繁體中文。`
           },
           {
-            role: "user",
+            role: 'user',
             content: `
-              原始逐字稿：
-              "${transcript}"
-              
-              請執行以下任務：
-              1. 修飾逐字稿：去除贅字，將其轉化為流暢、專業的『精華逐字稿』。
-              2. 深度分析：生成包含會議總覽、核心決議、品牌定位、人物塑造、關鍵故事、市場分析、行業洞察及個人生活細節的詳盡總結。
-              3. 行動項目：列出具體的分工與後續步驟。
-              
-              請以 JSON 格式返回：
-              {
-                "transcript": "修飾後的專業精華逐字稿...",
-                "summary": "極其詳盡且具敘事感的會議總結（需包含上述所有結構，文字需優美）...",
-                "actionItems": ["具體項目 1", "具體項目 2", ...]
-              }
-              
-              請使用繁體中文。
-            `
+原始逐字稿：
+"${transcript}"
+
+請執行以下任務：
+1. 修飾逐字稿：去除贅字，轉化為流暢專業的「精華逐字稿」。
+2. **保留原始的數字時間戳記（如 [00:00:05]）與說話者，絕對不要替換成文字佔位符。**
+3. 深度分析：根據對話實際性質生成總結。嚴禁虛構。
+4. 行動項目：列出具體分工（若有）。
+
+請以 JSON 格式返回：
+{
+  "transcript": "修飾後的內容...",
+  "summary": "真實且具洞察力的總結（Markdown）...",
+  "actionItems": []
+}`
           }
         ],
-        response_format: { type: "json_object" }
+        response_format: { type: 'json_object' }
       });
 
-      const content = response.choices[0].message.content;
-      if (!content) throw new Error("GPT-4o 分析無回應");
-      
-      const result = JSON.parse(content);
-      return {
-        ...result,
-        rawTranscript: transcript,
-        modelInfo: "GPT-4o"
-      };
+      const content = response.choices[0].message.content || '';
+      const result = JSON.parse(content.replace(/```json\n?|```/g, '').trim());
+      return { ...result, rawTranscript: transcript, modelInfo: 'GPT-4o' };
     } catch (error) {
-      console.error("GPT-4o 分析失敗:", error);
+      console.error('GPT-4o 分析失敗:', error);
     }
   }
 
-  // Fallback to Gemini
+  // Gemini fallback
   const ai = getGemini();
-  if (!ai) throw new Error("Gemini API key is missing");
-  const model = "gemini-3-flash-preview";
-  
-  const prompt = `
-    請根據以下逐字稿生成一份『大師級會議紀錄』：
-    "${transcript}"
-    
-    ${contextHint ? `本次會議背景資訊：${contextHint}。請確保分析中提及的專有名詞與此資訊一致。` : ""}
-    
-    任務：
-    1. 修飾逐字稿為專業流暢的內容。
-    2. 生成包含總覽、決議、品牌/人物 IP 定位、關鍵故事、市場/行業洞察、個人細節的詳盡總結。
-    3. 列出具體行動項目。
-    
-    請以 JSON 格式返回：
-    {
-      "transcript": "修飾後的專業精華逐字稿...",
-      "summary": "極其詳盡且具敘事感的會議總結...",
-      "actionItems": ["項目 1", "項目 2", ...]
-    }
-    使用繁體中文。
-  `;
+  if (!ai) throw new Error('Gemini API key is missing');
 
   const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: { responseMimeType: "application/json" },
+    model: 'gemini-3-flash-preview',
+    contents: `
+請根據以下逐字稿生成一份真實且具深度的會議紀錄：
+"${transcript}"
+
+${contextHint ? `本次對話背景資訊：${contextHint}。` : ''}
+
+**嚴格指令：**
+1. 嚴禁虛構內容。如逐字稿不足，在 summary 中說明「無法從音訊中提取足夠資訊」。
+2. 保留說話者與原始數字時間戳記（如 [00:01:23]）。保持原始語言。
+3. 生成總結：使用 Markdown 格式，捕捉真實細節。
+4. 行動項目：列出具體項目（若有）。
+
+以 JSON 格式返回：
+{
+  "transcript": "修飾後的專業精華逐字稿...",
+  "summary": "真實且具洞察力的對話總結...",
+  "actionItems": ["項目 1", "項目 2"]
+}
+分析內容請使用繁體中文。`,
+    config: { responseMimeType: 'application/json' }
   });
 
-  const text = response.text;
-  if (!text) throw new Error("Gemini 分析無回應");
-  
-  const result = JSON.parse(text);
-  return {
-    ...result,
-    rawTranscript: transcript,
-    modelInfo: "Gemini 3 Flash"
-  };
-}
-
-export async function processMeetingAudio(audioBase64: string, mimeType: string): Promise<TranscriptionResult> {
-  // For backward compatibility or one-click flow, we still keep this but it now calls the two steps
-  const { transcript, modelInfo: tModel } = await transcribeAudio(audioBase64, mimeType);
-  const analysis = await analyzeTranscript(transcript);
-  return {
-    ...analysis,
-    rawTranscript: transcript,
-    modelInfo: `${tModel} + ${analysis.modelInfo}`
-  };
+  const result = JSON.parse(response.text || '{}');
+  return { ...result, rawTranscript: transcript, modelInfo: 'Gemini 3 Flash' };
 }
 
 export async function summarizeTranscript(transcript: string, contextHint?: string): Promise<Partial<TranscriptionResult>> {
@@ -235,87 +251,52 @@ export async function summarizeTranscript(transcript: string, contextHint?: stri
   if (openaiApiKey && openai) {
     try {
       const response = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: 'gpt-4o',
         messages: [
           {
-            role: "system",
-            content: `您是一位頂級的 AI 會議助理。${contextHint ? `本次會議背景：${contextHint}。` : ""}請根據逐字稿生成極其詳盡、具備敘事感且結構嚴謹的會議總結，包含背景、決議、品牌定位、人物塑造、關鍵故事、市場分析及個人生活細節。`
+            role: 'system',
+            content: `您是一位專業且具備深度的 AI 會議助理。${contextHint ? `本次對話背景：${contextHint}。` : ''}請根據逐字稿生成真實、自然且具備洞察力的會議總結。`
           },
           {
-            role: "user",
-            content: `
-              分析以下會議逐字稿，並生成一份如『大師級紀錄』般詳盡的總結：
-              "${transcript}"
-              
-              請以 JSON 格式返回：
-              {
-                "summary": "極其詳盡且具敘事感的會議總結（包含總覽、決議、定位、IP塑造、關鍵故事、市場洞察等結構）...",
-                "actionItems": ["具體且可執行的行動項目 1", "具體且可執行的行動項目 2", ...]
-              }
-              
-              請使用繁體中文，並務必捕捉所有具體細節。
-            `
+            role: 'user',
+            content: `分析以下會議逐字稿：
+"${transcript}"
+
+以 JSON 格式返回：
+{
+  "summary": "真實且具洞察力的對話總結（Markdown 格式）...",
+  "actionItems": ["具體且可執行的行動項目 1", "項目 2"]
+}
+請使用繁體中文，不要虛構內容。`
           }
         ],
-        response_format: { type: "json_object" }
+        response_format: { type: 'json_object' }
       });
-      const content = response.choices[0].message.content;
-      if (content) {
-        const result = JSON.parse(content);
-        return {
-          ...result,
-          modelInfo: "GPT-4o"
-        };
-      }
+      const result = JSON.parse((response.choices[0].message.content || '').replace(/```json\n?|```/g, '').trim());
+      return { ...result, modelInfo: 'GPT-4o' };
     } catch (error) {
-      console.error("OpenAI 摘要失敗:", error);
+      console.error('OpenAI 摘要失敗:', error);
     }
   }
 
   const ai = getGemini();
-  if (!ai) throw new Error("Gemini API key is missing");
-
-  const model = "gemini-3-flash-preview";
-  
-  const prompt = `
-    分析以下會議逐字稿，並生成一份極其詳盡、具備敘事感且結構嚴謹的『大師級會議紀錄』：
-    "${transcript}"
-    
-    ${contextHint ? `已知背景資訊：${contextHint}。請確保總結中的專有名詞與此資訊一致。` : ""}
-    
-    請務必包含以下結構（若內容中有提及）：
-    1. 會議總覽
-    2. 核心決議與後續步驟
-    3. 品牌/專案定位
-    4. 個人 IP/人物塑造
-    5. 關鍵故事與內容素材（挖掘生動細節）
-    6. 市場與客群分析
-    7. 行業洞察
-    8. 個人生活與興趣
-    
-    請以 JSON 格式返回：
-    {
-      "summary": "極其詳盡且具敘事感的會議總結（包含上述所有結構）...",
-      "actionItems": ["具體且可執行的行動項目 1", "具體且可執行的行動項目 2", ...]
-    }
-    
-    請使用繁體中文，並捕捉具體的數字、人名與細節。
-  `;
+  if (!ai) throw new Error('Gemini API key is missing');
 
   const response = await ai.models.generateContent({
-    model,
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-    },
+    model: 'gemini-3-flash-preview',
+    contents: `分析以下會議逐字稿，生成真實且具深度的會議紀錄：
+"${transcript}"
+${contextHint ? `已知背景資訊：${contextHint}。` : ''}
+
+以 JSON 格式返回：
+{
+  "summary": "真實且具洞察力的對話總結（Markdown 格式）...",
+  "actionItems": ["具體項目 1", "項目 2"]
+}
+請使用繁體中文，不要強行套用不相關的模板。`,
+    config: { responseMimeType: 'application/json' }
   });
 
-  const text = response.text;
-  if (!text) throw new Error("AI 沒有回應");
-  
-  const result = JSON.parse(text);
-  return {
-    ...result,
-    modelInfo: "Gemini 3 Flash"
-  };
+  const result = JSON.parse((response.text || '').replace(/```json\n?|```/g, '').trim());
+  return { ...result, modelInfo: 'Gemini 3 Flash' };
 }

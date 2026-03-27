@@ -2,56 +2,21 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * KEY CHANGES vs original:
- * - Chunked recording: every CHUNK_INTERVAL_MS (3 min) the recorder auto-restarts,
- *   the previous chunk is immediately sent to Whisper/Gemini for transcription,
- *   and the result is appended to liveTranscript shown in real time.
- * - stopRecording() drains the final (possibly short) chunk before finishing.
- * - handleAudioProcessing() is now only called with a SINGLE chunk at a time.
- * - "一鍵生成會議紀錄" (handleManualAnalysis) reads the accumulated full transcript.
+ * Mobile-first redesign:
+ * - Phone: bottom tab bar (錄音 / 記錄 / 我的) + fullscreen recording view + bottom-sheet detail
+ * - Desktop: original sidebar + main panel layout preserved
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  auth,
-  loginWithGoogle,
-  logout,
-  db,
-  collection,
-  doc,
-  setDoc,
-  onSnapshot,
-  query,
-  where,
-  orderBy,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  Timestamp,
-  onAuthStateChanged,
-  User,
-  OperationType,
-  handleFirestoreError
+  auth, loginWithGoogle, logout, db, collection, doc, setDoc,
+  onSnapshot, query, where, orderBy, addDoc, updateDoc, deleteDoc,
+  Timestamp, onAuthStateChanged, User, OperationType, handleFirestoreError
 } from './firebase';
 import {
-  Mic,
-  StopCircle,
-  FileText,
-  ListChecks,
-  History,
-  Plus,
-  Trash2,
-  LogOut,
-  CheckCircle2,
-  Clock,
-  AlertCircle,
-  ChevronRight,
-  User as UserIcon,
-  Search,
-  MoreVertical,
-  X,
-  Loader2,
-  Layers
+  Mic, StopCircle, FileText, ListChecks, History, Trash2, LogOut,
+  CheckCircle2, Clock, User as UserIcon, Search, X, Loader2, Layers,
+  ChevronDown, Sparkles, BookOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -59,34 +24,18 @@ import { twMerge } from 'tailwind-merge';
 import { format } from 'date-fns';
 import ReactMarkdown from 'react-markdown';
 import {
-  transcribeChunk,
-  mergeChunkTranscripts,
-  analyzeTranscript,
-  WHISPER_SAFE_SIZE_BYTES
+  transcribeChunk, mergeChunkTranscripts, analyzeTranscript, WHISPER_SAFE_SIZE_BYTES
 } from './services/geminiService';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-/** Auto-split recording every N ms. 3 min = safe under Whisper 25MB limit for most setups. */
 const CHUNK_INTERVAL_MS = 3 * 60 * 1000;
 
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface Meeting {
-  id: string;
-  userId: string;
-  title: string;
-  date: Timestamp;
-  duration?: number;
-  transcript?: string;
-  rawTranscript?: string;
-  summary?: string;
-  actionItems?: string[];
-  modelInfo?: string;
-  contextHint?: string;
-  status: 'recording' | 'processing' | 'completed' | 'error';
+  id: string; userId: string; title: string; date: Timestamp;
+  duration?: number; transcript?: string; rawTranscript?: string;
+  summary?: string; actionItems?: string[]; modelInfo?: string;
+  contextHint?: string; status: 'recording' | 'processing' | 'completed' | 'error';
 }
 
 // ─── Logo ─────────────────────────────────────────────────────────────────────
@@ -95,32 +44,36 @@ const Logo = ({ className }: { className?: string }) => (
     <circle cx="50" cy="50" r="45" className="stroke-wood/10" strokeWidth="0.5" />
     <circle cx="50" cy="50" r="35" className="stroke-wood/20" strokeWidth="0.5" />
     <circle cx="50" cy="50" r="25" className="stroke-wood/30" strokeWidth="0.5" />
-    <motion.path
-      d="M30 50 Q 40 20, 50 50 T 70 50"
-      className="stroke-forest"
-      strokeWidth="2"
-      strokeLinecap="round"
-      animate={{ d: ['M30 50 Q 40 20, 50 50 T 70 50', 'M30 50 Q 40 80, 50 50 T 70 50', 'M30 50 Q 40 20, 50 50 T 70 50'] }}
-      transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }}
-    />
-    <motion.path
-      d="M35 50 Q 45 35, 50 50 T 65 50"
-      className="stroke-terracotta"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      animate={{ d: ['M35 50 Q 45 35, 50 50 T 65 50', 'M35 50 Q 45 65, 50 50 T 65 50', 'M35 50 Q 45 35, 50 50 T 65 50'] }}
-      transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut', delay: 0.5 }}
-    />
-    <motion.circle
-      cx="50" cy="50" r="4"
-      className="fill-sage"
-      animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
-      transition={{ repeat: Infinity, duration: 2 }}
-    />
+    <motion.path d="M30 50 Q 40 20, 50 50 T 70 50" className="stroke-forest" strokeWidth="2" strokeLinecap="round"
+      animate={{ d: ['M30 50 Q 40 20, 50 50 T 70 50','M30 50 Q 40 80, 50 50 T 70 50','M30 50 Q 40 20, 50 50 T 70 50'] }}
+      transition={{ repeat: Infinity, duration: 4, ease: 'easeInOut' }} />
+    <motion.path d="M35 50 Q 45 35, 50 50 T 65 50" className="stroke-terracotta" strokeWidth="1.5" strokeLinecap="round"
+      animate={{ d: ['M35 50 Q 45 35, 50 50 T 65 50','M35 50 Q 45 65, 50 50 T 65 50','M35 50 Q 45 35, 50 50 T 65 50'] }}
+      transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut', delay: 0.5 }} />
+    <motion.circle cx="50" cy="50" r="4" className="fill-sage"
+      animate={{ scale: [1,1.5,1], opacity: [0.5,1,0.5] }} transition={{ repeat: Infinity, duration: 2 }} />
   </svg>
 );
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Animated waveform ────────────────────────────────────────────────────────
+const Waveform = ({ volume, active }: { volume: number; active: boolean }) => (
+  <div className="flex items-center justify-center gap-[3px] h-14 w-full">
+    {Array.from({ length: 24 }).map((_, i) => {
+      const shape = Math.sin((i / 24) * Math.PI) * 0.7 + 0.15;
+      return (
+        <motion.div key={i} className="w-[3px] rounded-full bg-white/70"
+          animate={{ height: active ? [Math.max(4, volume * 0.3 * shape), Math.max(4, volume * 0.5 * shape), Math.max(4, volume * 0.3 * shape)] : [4] }}
+          transition={{ repeat: Infinity, duration: 0.35 + i * 0.025, ease: 'easeInOut' }}
+          style={{ minHeight: 4, maxHeight: 52 }}
+        />
+      );
+    })}
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ═══════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
@@ -132,902 +85,941 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [contextHint, setContextHint] = useState('');
   const [audioVolume, setAudioVolume] = useState(0);
+  const [activeTab, setActiveTab] = useState<'record'|'history'|'profile'>('record');
+  const [showContextInput, setShowContextInput] = useState(false);
 
-  // ── Chunked recording state ──────────────────────────────────────────────
-  /** Accumulated transcript from all completed chunks (real-time display) */
+  // Chunked recording
   const [liveTranscript, setLiveTranscript] = useState('');
-  /** Number of chunks processed so far */
   const [chunksProcessed, setChunksProcessed] = useState(0);
-  /** Whether a chunk is currently being transcribed (background) */
   const [isTranscribingChunk, setIsTranscribingChunk] = useState(false);
-  /** Firestore meeting ID for the ongoing session */
   const currentMeetingIdRef = useRef<string>('');
-  /** All raw chunk transcripts in order */
   const chunkTranscriptsRef = useRef<string[]>([]);
-  /** Model used (to show in UI) */
   const transcribeModelRef = useRef<string>('');
 
-  // ── MediaRecorder refs ───────────────────────────────────────────────────
+  // MediaRecorder
   const streamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const chunkTimerRef = useRef<NodeJS.Timeout | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const mimeTypeRef = useRef<string>('audio/webm');
-  /** Track current chunk index for timestamp offset calculation */
   const chunkIndexRef = useRef(0);
+  const isRecordingRef = useRef(false);
+  useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+  /**
+   * isFinalRef is set to true SYNCHRONOUSLY inside stopRecording() BEFORE
+   * mediaRecorder.stop() is called, so the onstop closure always reads the
+   * correct value — no React batch-update timing issue.
+   */
+  const isFinalRef = useRef(false);
 
-  // ── Auth ─────────────────────────────────────────────────────────────────
+  // Auth
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setIsAuthReady(true);
-      if (currentUser) {
-        const userRef = doc(db, 'users', currentUser.uid);
-        setDoc(userRef, {
-          uid: currentUser.uid,
-          email: currentUser.email,
-          displayName: currentUser.displayName,
-          photoURL: currentUser.photoURL,
-          createdAt: Timestamp.now()
-        }, { merge: true }).catch(err => handleFirestoreError(err, OperationType.WRITE, `users/${currentUser.uid}`));
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u); setIsAuthReady(true);
+      if (u) {
+        setDoc(doc(db, 'users', u.uid), {
+          uid: u.uid, email: u.email, displayName: u.displayName,
+          photoURL: u.photoURL, createdAt: Timestamp.now()
+        }, { merge: true }).catch(e => handleFirestoreError(e, OperationType.WRITE, `users/${u.uid}`));
       }
     });
     return unsub;
   }, []);
 
-  // ── Meetings listener ────────────────────────────────────────────────────
+  // Meetings listener
   useEffect(() => {
     if (!user) { setMeetings([]); return; }
-    const q = query(
-      collection(db, 'meetings'),
-      where('userId', '==', user.uid),
-      orderBy('date', 'desc')
-    );
-    const unsub = onSnapshot(q, (snap) => {
-      setMeetings(snap.docs.map(d => ({ id: d.id, ...d.data() })) as Meeting[]);
-    }, (err) => handleFirestoreError(err, OperationType.LIST, 'meetings'));
+    const q = query(collection(db,'meetings'), where('userId','==',user.uid), orderBy('date','desc'));
+    const unsub = onSnapshot(q, (s) => setMeetings(s.docs.map(d => ({ id: d.id, ...d.data() })) as Meeting[]),
+      (e) => handleFirestoreError(e, OperationType.LIST, 'meetings'));
     return unsub;
   }, [user]);
 
-  // ── Recording timer ──────────────────────────────────────────────────────
+  // Browser tab title
   useEffect(() => {
     if (isRecording) {
-      timerRef.current = setInterval(() => setRecordingTime(prev => prev + 1), 1000);
+      const mins = String(Math.floor(recordingTime / 60)).padStart(2, '0');
+      const secs = String(recordingTime % 60).padStart(2, '0');
+      document.title = `⏺ ${mins}:${secs} 錄音中 — SyncLingua`;
+    } else if (isProcessing) {
+      document.title = '⚙️ 處理中 — SyncLingua';
     } else {
-      if (timerRef.current) clearInterval(timerRef.current);
-      setRecordingTime(0);
+      document.title = 'SyncLingua — AI 會議錄音';
     }
+  }, [isRecording, isProcessing, recordingTime]);
+
+  // Timer
+  useEffect(() => {
+    if (isRecording) { timerRef.current = setInterval(() => setRecordingTime(p => p + 1), 1000); }
+    else { if (timerRef.current) clearInterval(timerRef.current); setRecordingTime(0); }
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [isRecording]);
 
-  // ── Core: flush one MediaRecorder cycle as a chunk ───────────────────────
-  /**
-   * Called when a MediaRecorder stops (either by auto-rotation or final stop).
-   * Converts collected audio data to a Blob, sends to Whisper/Gemini,
-   * and appends result to liveTranscript.
-   */
-  const flushChunk = useCallback(async (chunks: Blob[], chunkIdx: number, mimeType: string, isFinal: boolean) => {
-    if (chunks.length === 0) return;
-
-    const audioBlob = new Blob(chunks, { type: mimeType });
-    console.log(`Flushing chunk ${chunkIdx}: ${audioBlob.size} bytes, final=${isFinal}`);
-
-    // Safety: if somehow > safe size, log a warning (shouldn't happen with 3-min chunks)
-    if (audioBlob.size > WHISPER_SAFE_SIZE_BYTES) {
-      console.warn(`Chunk ${chunkIdx} exceeds 24MB (${audioBlob.size} bytes). Transcription may fail.`);
-    }
-
+  // Flush chunk
+  const flushChunk = useCallback(async (chunks: Blob[], idx: number, mime: string, isFinal: boolean) => {
+    if (!chunks.length) return;
+    const blob = new Blob(chunks, { type: mime });
+    if (blob.size > WHISPER_SAFE_SIZE_BYTES) console.warn(`Chunk ${idx} > 24MB`);
     setIsTranscribingChunk(true);
     try {
-      const { transcript, modelInfo } = await transcribeChunk(audioBlob, chunkIdx, contextHint);
+      const { transcript, modelInfo } = await transcribeChunk(blob, idx, contextHint, CHUNK_INTERVAL_MS / 1000);
       transcribeModelRef.current = modelInfo;
-
-      // Store raw chunk transcript
-      chunkTranscriptsRef.current[chunkIdx] = transcript;
-
-      // Build cumulative transcript with adjusted timestamps
-      const fullTranscript = mergeChunkTranscripts(
-        chunkTranscriptsRef.current,
-        CHUNK_INTERVAL_MS / 1000
-      );
-
-      setLiveTranscript(fullTranscript);
-      setChunksProcessed(prev => prev + 1);
-
-      // Persist to Firestore incrementally
+      chunkTranscriptsRef.current[idx] = transcript;
+      const full = mergeChunkTranscripts(chunkTranscriptsRef.current);
+      setLiveTranscript(full);
+      setChunksProcessed(p => p + 1);
       if (currentMeetingIdRef.current) {
         await updateDoc(doc(db, 'meetings', currentMeetingIdRef.current), {
-          rawTranscript: fullTranscript,
-          transcript: fullTranscript,
-          modelInfo,
-          status: isFinal ? 'completed' : 'recording'
+          rawTranscript: full, transcript: full, modelInfo, status: isFinal ? 'completed' : 'recording'
         });
       }
-
       if (isFinal) {
-        // Update selectedMeeting so the detail view refreshes
-        setSelectedMeeting(prev => prev
-          ? { ...prev, rawTranscript: fullTranscript, transcript: fullTranscript, modelInfo, status: 'completed' }
-          : null
-        );
-        setIsTranscribingChunk(false);
-        setIsProcessing(false);
+        setSelectedMeeting(p => p ? { ...p, rawTranscript: full, transcript: full, modelInfo, status: 'completed' } : null);
+        setIsTranscribingChunk(false); setIsProcessing(false);
       }
-    } catch (err) {
-      console.error(`Chunk ${chunkIdx} transcription error:`, err);
+    } catch (e) {
+      console.error(`Chunk ${idx} error:`, e);
       if (isFinal) {
-        if (currentMeetingIdRef.current) {
-          await updateDoc(doc(db, 'meetings', currentMeetingIdRef.current), {
-            status: 'error',
-            transcript: '轉錄過程中發生錯誤，請檢查網路連線或稍後再試。'
-          });
-        }
-        setIsTranscribingChunk(false);
-        setIsProcessing(false);
+        if (currentMeetingIdRef.current) await updateDoc(doc(db,'meetings',currentMeetingIdRef.current), { status: 'error', transcript: '轉錄發生錯誤，請稍後再試。' });
+        setIsTranscribingChunk(false); setIsProcessing(false);
       }
     }
   }, [contextHint]);
 
-  // ── Start a fresh MediaRecorder segment ─────────────────────────────────
-  const startNewSegment = useCallback(() => {
-    if (!streamRef.current) return;
-
-    const mimeType = mimeTypeRef.current;
-    const recorder = new MediaRecorder(streamRef.current, { mimeType });
-    mediaRecorderRef.current = recorder;
-    audioChunksRef.current = [];
-
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunksRef.current.push(e.data);
-    };
-
-    recorder.onstop = async () => {
-      // This fires EITHER from chunkTimer rotation OR from final stopRecording()
-      // We determine which by checking isRecording state via a ref isn't reliable after
-      // async; instead we pass intent via a closure variable set before calling .stop()
-    };
-
-    recorder.start(1000); // collect every second
-  }, []);
-
-  // ── Start recording ──────────────────────────────────────────────────────
   const startRecording = async () => {
     try {
-      // Reset state
-      chunkTranscriptsRef.current = [];
-      chunkIndexRef.current = 0;
-      setLiveTranscript('');
-      setChunksProcessed(0);
-      transcribeModelRef.current = '';
-      currentMeetingIdRef.current = '';
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        }
-      });
+      chunkTranscriptsRef.current = []; chunkIndexRef.current = 0;
+      setLiveTranscript(''); setChunksProcessed(0);
+      transcribeModelRef.current = ''; currentMeetingIdRef.current = '';
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       streamRef.current = stream;
-
-      // Volume monitoring
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      audioContextRef.current = audioContext;
-      analyserRef.current = analyser;
-
-      const bufferLength = analyser.frequencyBinCount;
-      const dataArray = new Uint8Array(bufferLength);
-      const updateVolume = () => {
-        if (!analyserRef.current) return;
-        analyserRef.current.getByteFrequencyData(dataArray);
-        const avg = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
-        setAudioVolume(avg);
-        animationFrameRef.current = requestAnimationFrame(updateVolume);
-      };
-      updateVolume();
-
-      mimeTypeRef.current = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/webm';
-
+      const ac = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const src = ac.createMediaStreamSource(stream);
+      const an = ac.createAnalyser(); an.fftSize = 256; src.connect(an);
+      audioContextRef.current = ac; analyserRef.current = an;
+      const buf = new Uint8Array(an.frequencyBinCount);
+      const tick = () => { if (!analyserRef.current) return; analyserRef.current.getByteFrequencyData(buf); setAudioVolume(buf.reduce((a,b)=>a+b,0)/buf.length); animationFrameRef.current = requestAnimationFrame(tick); };
+      tick();
+      mimeTypeRef.current = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
       setIsRecording(true);
-
-      // Create Firestore record immediately
       if (user) {
-        const meetingData: Omit<Meeting, 'id'> = {
-          userId: user.uid,
-          title: `${format(new Date(), 'yyyy年MM月dd日 HH:mm')} 的錄音`,
-          date: Timestamp.now(),
-          contextHint,
-          status: 'recording'
-        };
-        const docRef = await addDoc(collection(db, 'meetings'), meetingData);
-        currentMeetingIdRef.current = docRef.id;
-        setSelectedMeeting({ ...meetingData, id: docRef.id });
+        const data: Omit<Meeting,'id'> = { userId: user.uid, title: `${format(new Date(),'yyyy年MM月dd日 HH:mm')} 的錄音`, date: Timestamp.now(), contextHint, status: 'recording' };
+        const ref = await addDoc(collection(db,'meetings'), data);
+        currentMeetingIdRef.current = ref.id;
+        setSelectedMeeting({ ...data, id: ref.id });
       }
-
-      // ── Start first segment ──────────────────────────────────────────────
-      const mimeType = mimeTypeRef.current;
-
-      const launchSegment = () => {
+      isFinalRef.current = false; // reset at start of every session
+      const mime = mimeTypeRef.current;
+      const launch = () => {
         const idx = chunkIndexRef.current;
-        const recorder = new MediaRecorder(stream, { mimeType });
-        mediaRecorderRef.current = recorder;
-        const localChunks: Blob[] = [];
-
-        recorder.ondataavailable = (e) => {
-          if (e.data.size > 0) localChunks.push(e.data);
+        const rec = new MediaRecorder(stream, { mimeType: mime });
+        mediaRecorderRef.current = rec;
+        const local: Blob[] = [];
+        rec.ondataavailable = e => { if (e.data.size > 0) local.push(e.data); };
+        rec.onstop = () => {
+          // isFinalRef.current is set SYNCHRONOUSLY inside stopRecording() before
+          // rec.stop() is called, so this always reads the correct intent.
+          flushChunk(local, idx, mime, isFinalRef.current);
         };
-
-        recorder.onstop = () => {
-          // Check if we should keep going (rotation) or wrap up (final stop)
-          // We communicate intent via chunkIndexRef:
-          // if isRecordingRef.current is still true → rotation, else → final
-          const isFinalChunk = !isRecordingRef.current;
-          flushChunk(localChunks, idx, mimeType, isFinalChunk);
-        };
-
-        recorder.start(1000);
-
-        // Schedule auto-rotation
+        rec.start(1000);
         chunkTimerRef.current = setTimeout(() => {
           if (mediaRecorderRef.current?.state === 'recording') {
             chunkIndexRef.current += 1;
-            recorder.stop();
-            // After onstop fires and flushChunk begins (async),
-            // start the next segment immediately
-            setTimeout(launchSegment, 100);
+            // isFinalRef stays false for auto-rotation chunks
+            rec.stop();
+            setTimeout(launch, 150); // small gap to let onstop fire first
           }
         }, CHUNK_INTERVAL_MS);
       };
-
-      launchSegment();
-
-    } catch (error) {
-      console.error('Error starting recording:', error);
-      alert('無法存取麥克風。請檢查權限設定。');
-    }
+      launch();
+    } catch (e) { console.error(e); alert('無法存取麥克風，請檢查權限。'); }
   };
 
-  // ── isRecording ref (to communicate with onstop closure) ────────────────
-  const isRecordingRef = useRef(false);
-  useEffect(() => {
-    isRecordingRef.current = isRecording;
-  }, [isRecording]);
-
-  // ── Stop recording ───────────────────────────────────────────────────────
   const stopRecording = () => {
     if (!isRecording) return;
-
-    // Clear auto-rotation timer first
-    if (chunkTimerRef.current) {
-      clearTimeout(chunkTimerRef.current);
-      chunkTimerRef.current = null;
-    }
-
+    // Cancel auto-rotation timer
+    if (chunkTimerRef.current) { clearTimeout(chunkTimerRef.current); chunkTimerRef.current = null; }
     // Stop volume monitoring
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     if (audioContextRef.current) audioContextRef.current.close();
     setAudioVolume(0);
-
-    // Signal final stop BEFORE calling recorder.stop() so the onstop closure sees it
+    // CRITICAL: set isFinalRef BEFORE calling rec.stop(), so that the onstop
+    // closure which fires synchronously (or near-synchronously) sees isFinal=true.
+    isFinalRef.current = true;
     setIsRecording(false);
     isRecordingRef.current = false;
     setIsProcessing(true);
-
-    // Stop the current segment → triggers onstop → flushChunk(isFinal=true)
-    if (mediaRecorderRef.current?.state === 'recording') {
-      mediaRecorderRef.current.stop();
-    }
-
-    // Stop all mic tracks
+    // Trigger final flush
+    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
+    // Release mic
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
   };
 
-  // ── Manual analysis (generate meeting minutes) ───────────────────────────
   const handleManualAnalysis = async () => {
-    const transcript = selectedMeeting?.rawTranscript || liveTranscript;
-    if (!selectedMeeting || !transcript) return;
-
+    const tx = selectedMeeting?.rawTranscript || liveTranscript;
+    if (!selectedMeeting || !tx) return;
     setIsProcessing(true);
     try {
-      const result = await analyzeTranscript(transcript, selectedMeeting.contextHint);
-
-      await updateDoc(doc(db, 'meetings', selectedMeeting.id), {
-        transcript: result.transcript,
-        summary: result.summary,
-        actionItems: result.actionItems,
-        modelInfo: result.modelInfo,
-      });
-
-      setSelectedMeeting(prev => prev ? {
-        ...prev,
-        transcript: result.transcript,
-        summary: result.summary,
-        actionItems: result.actionItems,
-        modelInfo: result.modelInfo,
-      } : null);
-    } catch (error) {
-      console.error('Analysis error:', error);
-      alert('AI 分析失敗，請稍後再試。');
-    } finally {
-      setIsProcessing(false);
-    }
+      const r = await analyzeTranscript(tx, selectedMeeting.contextHint);
+      await updateDoc(doc(db,'meetings',selectedMeeting.id), { transcript: r.transcript, summary: r.summary, actionItems: r.actionItems, modelInfo: r.modelInfo });
+      setSelectedMeeting(p => p ? { ...p, transcript: r.transcript, summary: r.summary, actionItems: r.actionItems, modelInfo: r.modelInfo } : null);
+    } catch { alert('AI 分析失敗，請稍後再試。'); }
+    finally { setIsProcessing(false); }
   };
 
   const deleteMeeting = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (window.confirm('您確定要刪除此會議記錄嗎？')) {
-      try {
-        await deleteDoc(doc(db, 'meetings', id));
-        if (selectedMeeting?.id === id) setSelectedMeeting(null);
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `meetings/${id}`);
-      }
-    }
+    if (!window.confirm('確定要刪除此會議記錄嗎？')) return;
+    try { await deleteDoc(doc(db,'meetings',id)); if (selectedMeeting?.id === id) setSelectedMeeting(null); }
+    catch (e) { handleFirestoreError(e, OperationType.DELETE, `meetings/${id}`); }
   };
 
-  const filteredMeetings = meetings.filter(m =>
+  const filtered = meetings.filter(m =>
     m.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     m.summary?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  // ── Auth loading ─────────────────────────────────────────────────────────
-  if (!isAuthReady) {
-    return (
-      <div className="min-h-screen bg-paper flex items-center justify-center">
-        <motion.div
-          animate={{ scale: [1, 1.1, 1] }}
-          transition={{ repeat: Infinity, duration: 2 }}
-          className="w-12 h-12 bg-forest rounded-full"
-        />
-      </div>
-    );
-  }
+  // ── Loading ──────────────────────────────────────────────────────────────────
+  if (!isAuthReady) return (
+    <div className="min-h-screen bg-paper flex items-center justify-center">
+      <motion.div animate={{ scale:[1,1.1,1] }} transition={{ repeat: Infinity, duration: 2 }} className="w-12 h-12 bg-forest rounded-full" />
+    </div>
+  );
 
-  // ── Login page ───────────────────────────────────────────────────────────
-  if (!user) {
-    return (
-      <div className="min-h-screen bg-paper flex flex-col items-center justify-center p-6 font-sans overflow-hidden">
-        <div className="absolute inset-0 opacity-20 pointer-events-none">
-          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-sage blur-[120px] rounded-full" />
-          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-terracotta blur-[120px] rounded-full" />
-        </div>
-        <motion.div
-          initial={{ opacity: 0, y: 40 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
-          className="max-w-2xl w-full text-center relative z-10"
+  // ── Login ────────────────────────────────────────────────────────────────────
+  if (!user) return (
+    <div className="min-h-screen bg-paper flex flex-col items-center justify-center p-6 overflow-hidden">
+      <div className="absolute inset-0 opacity-20 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] bg-sage blur-[120px] rounded-full" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-terracotta blur-[120px] rounded-full" />
+      </div>
+      <motion.div initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8, ease: [0.16,1,0.3,1] }}
+        className="w-full max-w-sm text-center relative z-10"
+      >
+        <Logo className="w-20 h-20 mx-auto mb-8" />
+        <h1 className="text-6xl font-serif font-bold text-forest mb-5 tracking-tighter leading-[0.9]">
+          Sync<br /><span className="text-terracotta italic">Lingua</span>
+        </h1>
+        <p className="text-wood/70 mb-10 text-base font-serif italic leading-relaxed">
+          捕捉對話中的詩意與深度。<br />將每次會議轉化為專業紀錄。
+        </p>
+        <button onClick={loginWithGoogle}
+          className="w-full py-4 bg-forest text-white rounded-2xl font-bold text-base flex items-center justify-center gap-3 shadow-xl shadow-forest/20 active:scale-95 transition-all"
         >
-          <Logo className="mx-auto mb-12 w-24 h-24" />
-          <h1 className="text-8xl font-serif font-bold text-forest mb-8 tracking-tighter leading-[0.85]">
-            Sync<br /><span className="text-terracotta italic">Lingua</span>
-          </h1>
-          <p className="text-wood/80 mb-16 text-xl leading-relaxed font-serif italic max-w-lg mx-auto">
-            捕捉對話中的詩意與深度。將每一次會議轉化為具備敘事感的專業紀錄。
-          </p>
-          <div className="flex flex-col items-center gap-6">
-            <button
-              onClick={loginWithGoogle}
-              className="group relative px-12 py-5 bg-forest text-white rounded-full font-medium transition-all flex items-center gap-4 overflow-hidden shadow-2xl shadow-forest/20 hover:scale-105 active:scale-95"
-            >
-              <div className="absolute inset-0 bg-white/10 translate-y-full group-hover:translate-y-0 transition-transform duration-500" />
-              <UserIcon className="w-5 h-5 relative z-10" />
-              <span className="relative z-10 text-lg">使用 Google 帳號開啟旅程</span>
-            </button>
-            <div className="text-[10px] uppercase tracking-[0.3em] text-sage font-bold">
-              AI-Powered Narrative Intelligence
-            </div>
+          <UserIcon className="w-5 h-5" />使用 Google 帳號開始
+        </button>
+        <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-sage font-bold">AI-Powered · 自動分段 · 無限錄音</div>
+      </motion.div>
+    </div>
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // MAIN APP
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  // ── Shared MeetingDetail bottom-sheet content ────────────────────────────────
+  const MeetingDetailContent = ({ m }: { m: Meeting }) => (
+    <div className="px-5 pt-3 pb-10 space-y-4">
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div className="flex-1 pr-3">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-sage mb-1">
+            {format(m.date.toDate(), 'yyyy年MM月dd日 HH:mm')}
           </div>
-        </motion.div>
+          <h3 className="font-serif font-bold text-xl text-forest leading-tight">{m.title}</h3>
+          {m.modelInfo && (
+            <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 bg-sage/10 rounded-full">
+              <div className="w-1.5 h-1.5 rounded-full bg-sage" />
+              <span className="text-[10px] font-bold uppercase tracking-wider text-sage">{m.modelInfo}</span>
+            </div>
+          )}
+        </div>
+        <button onClick={() => setSelectedMeeting(null)}
+          className="p-2.5 bg-white rounded-xl border border-wood/10 active:bg-paper shrink-0">
+          <X className="w-4 h-4 text-wood" />
+        </button>
       </div>
-    );
-  }
 
-  // ── Main app ─────────────────────────────────────────────────────────────
-  return (
-    <div className="min-h-screen bg-paper flex font-sans text-forest">
+      {/* Live recording notice */}
+      {isRecording && m.id === currentMeetingIdRef.current && (
+        <div className="p-4 bg-terracotta/5 border border-terracotta/15 rounded-2xl">
+          <div className="flex items-center gap-2 mb-2">
+            <motion.div className="w-2 h-2 rounded-full bg-terracotta" animate={{ scale:[1,1.5,1] }} transition={{ repeat: Infinity, duration: 1 }} />
+            <span className="text-xs font-bold uppercase tracking-widest text-terracotta">錄音中</span>
+            {isTranscribingChunk && <Loader2 className="w-3.5 h-3.5 text-wood/50 animate-spin ml-auto" />}
+          </div>
+          {liveTranscript
+            ? <p className="text-xs text-forest/70 font-serif leading-relaxed line-clamp-4">{liveTranscript}</p>
+            : <p className="text-xs text-wood/40 font-serif italic">首段完成後將顯示逐字稿...</p>}
+        </div>
+      )}
 
-      {/* ── Sidebar ── */}
-      <aside className="w-80 bg-white border-r border-wood/5 flex flex-col h-screen sticky top-0 z-20">
-        <div className="p-8 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Logo className="w-10 h-10" />
-            <div className="flex flex-col">
-              <span className="font-serif font-bold text-2xl tracking-tighter text-forest leading-none">SyncLingua</span>
-              <span className="text-[8px] uppercase tracking-[0.4em] text-sage font-bold mt-1">Intelligence</span>
-            </div>
+      {/* Generate button */}
+      {(m.transcript || liveTranscript) && !m.summary && !isRecording && (
+        <button onClick={handleManualAnalysis} disabled={isProcessing}
+          className={cn('w-full py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2.5 bg-forest text-white shadow-lg shadow-forest/15 active:scale-[0.98] transition-all', isProcessing && 'opacity-50 cursor-not-allowed')}
+        >
+          {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" />生成中...</> : <><Sparkles className="w-4 h-4" />一鍵生成會議紀錄</>}
+        </button>
+      )}
+
+      {/* Summary */}
+      {m.summary && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <FileText className="w-4 h-4 text-terracotta" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-terracotta">會議總結</span>
+          </div>
+          <div className="bg-white p-4 rounded-2xl border border-wood/10">
+            <div className="markdown-body text-sm"><ReactMarkdown>{m.summary}</ReactMarkdown></div>
           </div>
         </div>
+      )}
 
-        <div className="px-6 py-4 space-y-4">
-          <div className="space-y-2">
-            <label className="text-[10px] uppercase tracking-widest text-sage font-bold px-1">會議背景提示 (選填)</label>
-            <input
-              type="text"
-              placeholder="例如：LIZ學堂、財經、職場防備..."
-              value={contextHint}
-              onChange={(e) => setContextHint(e.target.value)}
-              disabled={isRecording}
-              className="w-full px-4 py-3 bg-paper/30 border border-transparent focus:border-wood/10 rounded-xl text-xs focus:ring-0 transition-all placeholder:text-sage/40 disabled:opacity-50"
-            />
+      {/* Action items */}
+      {m.actionItems && m.actionItems.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <ListChecks className="w-4 h-4 text-forest" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-forest">行動項目</span>
           </div>
-
-          <button
-            onClick={isRecording ? stopRecording : startRecording}
-            disabled={isProcessing && !isRecording}
-            className={cn(
-              'w-full py-5 rounded-2xl font-medium flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden group',
-              isRecording
-                ? 'bg-terracotta text-white shadow-xl shadow-terracotta/20'
-                : 'bg-forest text-white shadow-xl shadow-forest/20 hover:bg-forest/90',
-              (isProcessing && !isRecording) && 'opacity-50 cursor-not-allowed'
-            )}
-          >
-            <div className="absolute inset-0 bg-white/5 opacity-0 group-hover:opacity-100 transition-opacity" />
-            {isRecording ? (
-              <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 1.5 }}>
-                <StopCircle className="w-6 h-6" />
-              </motion.div>
-            ) : <Mic className="w-6 h-6" />}
-            <span className="text-xs uppercase tracking-widest font-bold">
-              {isRecording ? `錄音中 ${format(recordingTime * 1000, 'mm:ss')}` : '啟動新會議錄製'}
-            </span>
-            {/* Chunk indicator during recording */}
-            {isRecording && chunksProcessed > 0 && (
-              <span className="text-[9px] text-white/60 flex items-center gap-1">
-                <Layers className="w-3 h-3" />
-                已完成 {chunksProcessed} 段轉錄
-                {isTranscribingChunk && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
-              </span>
-            )}
-          </button>
-        </div>
-
-        {/* Meeting list */}
-        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-8">
-          <div className="px-2">
-            <div className="relative group">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-sage group-focus-within:text-forest transition-colors" />
-              <input
-                type="text"
-                placeholder="搜尋紀錄..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-12 pr-4 py-3 bg-paper/30 border border-transparent focus:border-wood/10 rounded-xl text-sm focus:ring-0 transition-all placeholder:text-sage/50"
-              />
-            </div>
-          </div>
-
           <div className="space-y-2">
-            <div className="px-4 text-[9px] font-bold text-sage/60 uppercase tracking-[0.3em] mb-4">
-              Archive / 會議存檔
-            </div>
-            {filteredMeetings.length === 0 ? (
-              <div className="px-4 py-12 text-center text-sage/40 text-sm italic font-serif">尚無會議紀錄</div>
-            ) : (
-              <div className="space-y-1">
-                {filteredMeetings.map((meeting) => (
-                  <div
-                    key={meeting.id}
-                    onClick={() => setSelectedMeeting(meeting)}
-                    className={cn(
-                      'w-full text-left p-4 rounded-xl transition-all group flex items-start gap-4 border border-transparent cursor-pointer',
-                      selectedMeeting?.id === meeting.id
-                        ? 'bg-paper border-wood/10 shadow-sm'
-                        : 'hover:bg-paper/40'
-                    )}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setSelectedMeeting(meeting); }}
-                  >
-                    <div className={cn(
-                      'mt-2 w-1.5 h-1.5 rounded-full shrink-0',
-                      meeting.status === 'completed' ? 'bg-forest' :
-                        meeting.status === 'processing' ? 'bg-terracotta animate-pulse' :
-                          meeting.status === 'recording' ? 'bg-sage animate-pulse' :
-                            meeting.status === 'error' ? 'bg-red-400' : 'bg-wood/20'
-                    )} />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-serif font-bold truncate text-lg text-forest/90 leading-tight">{meeting.title}</div>
-                      <div className="text-[10px] text-wood/60 mt-1.5 flex items-center gap-2 uppercase tracking-wider font-bold">
-                        <Clock className="w-3 h-3" />
-                        {format(meeting.date.toDate(), 'yyyy.MM.dd')}
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => deleteMeeting(meeting.id, e)}
-                      className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-terracotta/10 hover:text-terracotta rounded-lg transition-all"
-                      aria-label="刪除會議"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
+            {m.actionItems.map((item, i) => (
+              <div key={i} className="flex items-start gap-3 p-3.5 bg-white rounded-xl border border-wood/10">
+                <CheckCircle2 className="w-4 h-4 text-sage mt-0.5 shrink-0" />
+                <span className="font-serif text-forest/80 text-sm">{item}</span>
               </div>
-            )}
+            ))}
           </div>
         </div>
+      )}
 
-        {/* User info */}
-        <div className="p-6 border-t border-wood/5 bg-paper/20">
-          <div className="flex items-center gap-4">
-            <div className="relative">
-              <img
-                src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName}`}
-                alt={user.displayName || 'User'}
-                className="w-11 h-11 rounded-full border-2 border-white shadow-md"
-                referrerPolicy="no-referrer"
-              />
-              <div className="absolute bottom-0 right-0 w-3 h-3 bg-emerald-500 border-2 border-white rounded-full" />
+      {/* Transcript */}
+      {m.transcript && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <History className="w-4 h-4 text-wood" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-wood">
+              {m.summary ? '精華逐字稿' : '完整逐字稿'}
+            </span>
+          </div>
+          <div className="bg-white p-4 rounded-2xl border border-wood/10 max-h-64 overflow-y-auto">
+            <p className="whitespace-pre-wrap text-forest/80 text-sm font-serif leading-relaxed">{m.transcript}</p>
+          </div>
+        </div>
+      )}
+
+      {/* Delete */}
+      <button onClick={(e) => { deleteMeeting(m.id, e); setSelectedMeeting(null); }}
+        className="w-full py-3.5 rounded-2xl border-2 border-terracotta/20 text-terracotta/80 font-bold text-sm flex items-center justify-center gap-2 active:bg-terracotta/5 transition-all"
+      >
+        <Trash2 className="w-4 h-4" />刪除此紀錄
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-paper font-sans text-forest">
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          DESKTOP  (md+)
+      ════════════════════════════════════════════════════════════════════════ */}
+      <div className="hidden md:flex min-h-screen">
+
+        {/* Sidebar */}
+        <aside className="w-80 bg-white border-r border-wood/5 flex flex-col h-screen sticky top-0 z-20">
+          <div className="p-8 flex items-center gap-4">
+            <Logo className="w-10 h-10" />
+            <div>
+              <div className="font-serif font-bold text-2xl tracking-tighter text-forest leading-none">SyncLingua</div>
+              <div className="text-[8px] uppercase tracking-[0.4em] text-sage font-bold mt-1">Intelligence</div>
             </div>
-            <div className="flex-1 min-w-0">
-              <div className="text-sm font-bold text-forest truncate">{user.displayName}</div>
-              <div className="text-[9px] text-wood/60 truncate uppercase tracking-widest font-bold">{user.email}</div>
+          </div>
+          <div className="px-6 py-4 space-y-4">
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase tracking-widest text-sage font-bold px-1">會議背景提示 (選填)</label>
+              <input type="text" placeholder="例如：LIZ學堂、財經..." value={contextHint} onChange={e => setContextHint(e.target.value)} disabled={isRecording}
+                className="w-full px-4 py-3 bg-paper/30 border border-transparent focus:border-wood/10 rounded-xl text-xs focus:ring-0 transition-all placeholder:text-sage/40 disabled:opacity-50" />
             </div>
-            <button
-              onClick={() => logout()}
-              className="p-2 hover:bg-terracotta/10 hover:text-terracotta rounded-xl transition-all"
-              aria-label="登出"
+            <button onClick={isRecording ? stopRecording : startRecording} disabled={isProcessing && !isRecording}
+              className={cn('w-full py-5 rounded-2xl font-medium flex flex-col items-center justify-center gap-2 transition-all relative overflow-hidden group',
+                isRecording ? 'bg-terracotta text-white shadow-xl shadow-terracotta/20' : 'bg-forest text-white shadow-xl shadow-forest/20 hover:bg-forest/90',
+                (isProcessing && !isRecording) && 'opacity-50 cursor-not-allowed')}
             >
-              <LogOut className="w-4 h-4" />
+              {isRecording
+                ? <motion.div animate={{ scale:[1,1.2,1] }} transition={{ repeat: Infinity, duration: 1.5 }}><StopCircle className="w-6 h-6" /></motion.div>
+                : <Mic className="w-6 h-6" />}
+              <span className="text-xs uppercase tracking-widest font-bold">
+                {isRecording ? `錄音中 ${format(recordingTime*1000,'mm:ss')}` : '啟動新會議錄製'}
+              </span>
+              {isRecording && chunksProcessed > 0 && (
+                <span className="text-[9px] text-white/60 flex items-center gap-1">
+                  <Layers className="w-3 h-3" />已完成 {chunksProcessed} 段
+                  {isTranscribingChunk && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
+                </span>
+              )}
             </button>
           </div>
-        </div>
-      </aside>
-
-      {/* ── Main content ── */}
-      <main className="flex-1 relative overflow-hidden">
-        <AnimatePresence mode="wait">
-
-          {/* ── Meeting detail / live view ── */}
-          {selectedMeeting ? (
-            <motion.div
-              key={selectedMeeting.id}
-              initial={{ opacity: 0, x: 30 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -30 }}
-              transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-              className="absolute inset-0 overflow-y-auto"
-            >
-              <div className="max-w-4xl mx-auto p-12 lg:p-20 pb-40">
-
-                {/* Header */}
-                <div className="flex items-start justify-between mb-16">
-                  <div className="flex-1">
-                    <div className="text-[10px] font-bold uppercase tracking-[0.3em] text-sage mb-3">
-                      {format(selectedMeeting.date.toDate(), 'yyyy年MM月dd日 · EEEE')}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+            <div className="relative">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-sage" />
+              <input type="text" placeholder="搜尋紀錄..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                className="w-full pl-12 pr-4 py-3 bg-paper/30 border border-transparent focus:border-wood/10 rounded-xl text-sm focus:ring-0 transition-all placeholder:text-sage/50" />
+            </div>
+            <div className="text-[9px] font-bold text-sage/60 uppercase tracking-[0.3em] px-2">Archive</div>
+            {filtered.length === 0
+              ? <div className="py-12 text-center text-sage/40 text-sm italic font-serif">尚無會議紀錄</div>
+              : filtered.map(m => (
+                <div key={m.id} onClick={() => setSelectedMeeting(m)} role="button" tabIndex={0}
+                  onKeyDown={e => { if (e.key==='Enter') setSelectedMeeting(m); }}
+                  className={cn('p-4 rounded-xl transition-all group flex items-start gap-3 border border-transparent cursor-pointer',
+                    selectedMeeting?.id===m.id ? 'bg-paper border-wood/10 shadow-sm' : 'hover:bg-paper/40')}
+                >
+                  <div className={cn('mt-2 w-1.5 h-1.5 rounded-full shrink-0',
+                    m.status==='completed'?'bg-forest': m.status==='recording'?'bg-sage animate-pulse': m.status==='error'?'bg-red-400':'bg-wood/20')} />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-serif font-bold truncate text-base text-forest/90">{m.title}</div>
+                    <div className="text-[10px] text-wood/60 mt-1 flex items-center gap-1 uppercase tracking-wider font-bold">
+                      <Clock className="w-3 h-3" />{format(m.date.toDate(),'yyyy.MM.dd')}
                     </div>
-                    <h2 className="text-5xl font-serif font-bold text-forest leading-tight tracking-tighter">
-                      {selectedMeeting.title}
-                    </h2>
-                    {selectedMeeting.modelInfo && (
-                      <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-sage/10 rounded-full">
-                        <div className="w-1.5 h-1.5 rounded-full bg-sage" />
-                        <span className="text-[10px] font-bold uppercase tracking-widest text-sage">
-                          {selectedMeeting.modelInfo}
-                        </span>
-                      </div>
-                    )}
                   </div>
-                  <button
-                    onClick={() => setSelectedMeeting(null)}
-                    className="p-3 hover:bg-wood/5 rounded-2xl transition-all ml-6 shrink-0"
-                  >
-                    <X className="w-5 h-5 text-wood" />
+                  <button onClick={e => deleteMeeting(m.id,e)}
+                    className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-terracotta/10 hover:text-terracotta rounded-lg transition-all">
+                    <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
+              ))
+            }
+          </div>
+          <div className="p-6 border-t border-wood/5">
+            <div className="flex items-center gap-4">
+              <img src={user.photoURL||`https://ui-avatars.com/api/?name=${user.displayName}`} alt="" referrerPolicy="no-referrer"
+                className="w-10 h-10 rounded-full border-2 border-white shadow-md" />
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-bold text-forest truncate">{user.displayName}</div>
+                <div className="text-[9px] text-wood/60 truncate uppercase tracking-widest font-bold">{user.email}</div>
+              </div>
+              <button onClick={() => logout()} className="p-2 hover:bg-terracotta/10 hover:text-terracotta rounded-xl transition-all">
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </aside>
 
-                {/* ── Live transcription progress during recording ── */}
-                {isRecording && selectedMeeting.id === currentMeetingIdRef.current && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mb-10 p-8 bg-terracotta/5 border border-terracotta/20 rounded-[32px]"
-                  >
-                    <div className="flex items-center gap-3 mb-4">
-                      <motion.div
-                        className="w-2 h-2 rounded-full bg-terracotta"
-                        animate={{ scale: [1, 1.5, 1], opacity: [1, 0.5, 1] }}
-                        transition={{ repeat: Infinity, duration: 1 }}
-                      />
-                      <span className="text-xs font-bold uppercase tracking-widest text-terracotta">
-                        錄音中 — 每 3 分鐘自動轉錄一段
-                      </span>
-                      {isTranscribingChunk && (
-                        <span className="flex items-center gap-1 text-[10px] text-wood/60">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          正在轉錄中...
-                        </span>
+        {/* Desktop main */}
+        <main className="flex-1 relative overflow-hidden">
+          <AnimatePresence mode="wait">
+            {selectedMeeting ? (
+              <motion.div key={selectedMeeting.id}
+                initial={{ opacity:0, x:30 }} animate={{ opacity:1, x:0 }} exit={{ opacity:0, x:-30 }}
+                transition={{ duration:0.4, ease:[0.16,1,0.3,1] }}
+                className="absolute inset-0 overflow-y-auto"
+              >
+                <div className="max-w-4xl mx-auto p-12 lg:p-20 pb-40">
+                  <div className="flex items-start justify-between mb-16">
+                    <div className="flex-1">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.3em] text-sage mb-3">
+                        {format(selectedMeeting.date.toDate(), 'yyyy年MM月dd日 · EEEE')}
+                      </div>
+                      <h2 className="text-5xl font-serif font-bold text-forest tracking-tighter">{selectedMeeting.title}</h2>
+                      {selectedMeeting.modelInfo && (
+                        <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-sage/10 rounded-full">
+                          <div className="w-1.5 h-1.5 rounded-full bg-sage" />
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-sage">{selectedMeeting.modelInfo}</span>
+                        </div>
                       )}
                     </div>
-                    {liveTranscript ? (
-                      <div className="whitespace-pre-wrap text-forest/70 text-sm font-serif leading-relaxed max-h-60 overflow-y-auto">
-                        {liveTranscript}
-                      </div>
-                    ) : (
-                      <div className="text-wood/40 text-sm italic font-serif">
-                        首段 3 分鐘完成後，逐字稿將即時顯示於此...
-                      </div>
-                    )}
-                  </motion.div>
-                )}
-
-                {/* ── Generate meeting minutes button ── */}
-                {(selectedMeeting.transcript || liveTranscript) && !selectedMeeting.summary && !isRecording && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mb-10"
-                  >
-                    <button
-                      onClick={handleManualAnalysis}
-                      disabled={isProcessing}
-                      className={cn(
-                        'w-full py-6 rounded-[24px] font-bold text-lg flex items-center justify-center gap-3 transition-all',
-                        'bg-forest text-white shadow-xl shadow-forest/20 hover:scale-[1.01] active:scale-[0.99]',
-                        isProcessing && 'opacity-50 cursor-not-allowed'
-                      )}
-                    >
-                      {isProcessing ? (
-                        <>
-                          <Loader2 className="w-5 h-5 animate-spin" />
-                          <span>正在生成會議紀錄...</span>
-                        </>
-                      ) : (
-                        <>
-                          <ListChecks className="w-5 h-5" />
-                          <span>一鍵生成會議紀錄</span>
-                        </>
-                      )}
+                    <button onClick={() => setSelectedMeeting(null)} className="p-3 hover:bg-wood/5 rounded-2xl transition-all ml-6 shrink-0">
+                      <X className="w-5 h-5 text-wood" />
                     </button>
-                    <p className="text-center text-wood/50 text-xs mt-3 font-serif italic">
-                      GPT-4o 將自動整理精華逐字稿、總結與行動項目
-                    </p>
-                  </motion.div>
-                )}
-
-                {/* ── Meeting minutes (summary) ── */}
-                {selectedMeeting.summary && (
-                  <div className="space-y-12">
-                    <section>
-                      <div className="flex items-center gap-4 mb-8">
-                        <FileText className="w-5 h-5 text-terracotta" />
-                        <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-terracotta">會議總結</h4>
-                      </div>
-                      <div className="bg-white p-12 rounded-[40px] border border-wood/10 shadow-sm">
-                        <div className="markdown-body">
-                          <ReactMarkdown>{selectedMeeting.summary}</ReactMarkdown>
-                        </div>
-                      </div>
-                    </section>
-
-                    {selectedMeeting.actionItems && selectedMeeting.actionItems.length > 0 && (
-                      <section>
-                        <div className="flex items-center gap-4 mb-8">
-                          <ListChecks className="w-5 h-5 text-forest" />
-                          <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-forest">行動項目</h4>
-                        </div>
-                        <div className="space-y-3">
-                          {selectedMeeting.actionItems.map((item, i) => (
-                            <div key={i} className="flex items-start gap-4 p-6 bg-white rounded-2xl border border-wood/10">
-                              <CheckCircle2 className="w-5 h-5 text-sage mt-0.5 shrink-0" />
-                              <span className="font-serif text-forest/80">{item}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    )}
                   </div>
-                )}
-
-                {/* ── Polished transcript ── */}
-                {selectedMeeting.transcript && (
-                  <section className="mt-12">
-                    <div className="flex items-center gap-4 mb-8">
-                      <History className="w-5 h-5 text-wood" />
-                      <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-wood">
-                        {selectedMeeting.summary ? '精華逐字稿' : '完整逐字稿'}
-                      </h4>
-                    </div>
-                    <div className="bg-white p-12 rounded-[40px] border border-wood/10">
-                      <div className="whitespace-pre-wrap text-forest/80 leading-relaxed text-base font-serif">
-                        {selectedMeeting.transcript}
+                  {isRecording && selectedMeeting.id === currentMeetingIdRef.current && (
+                    <motion.div initial={{ opacity:0, y:10 }} animate={{ opacity:1, y:0 }}
+                      className="mb-10 p-8 bg-terracotta/5 border border-terracotta/20 rounded-[32px]"
+                    >
+                      <div className="flex items-center gap-3 mb-4">
+                        <motion.div className="w-2 h-2 rounded-full bg-terracotta" animate={{ scale:[1,1.5,1] }} transition={{ repeat: Infinity, duration: 1 }} />
+                        <span className="text-xs font-bold uppercase tracking-widest text-terracotta">錄音中 — 每 3 分鐘自動轉錄</span>
+                        {isTranscribingChunk && <span className="flex items-center gap-1 text-[10px] text-wood/60 ml-2"><Loader2 className="w-3 h-3 animate-spin" />轉錄中...</span>}
                       </div>
-                    </div>
-                  </section>
-                )}
-
-                {/* ── Raw transcript backup ── */}
-                {selectedMeeting.rawTranscript && selectedMeeting.rawTranscript !== selectedMeeting.transcript && (
-                  <section className="mt-12 relative">
-                    <div className="absolute -right-8 top-0 writing-vertical text-[9px] font-bold uppercase tracking-[0.4em] text-sage/40 h-full flex items-center">
-                      Raw Data / 原始
-                    </div>
-                    <div className="bg-sage/5 p-12 rounded-[40px] border border-wood/10">
-                      <div className="flex items-center gap-4 mb-8">
-                        <History className="w-5 h-5 text-sage" />
-                        <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-sage">原始逐字稿備份</h4>
-                      </div>
-                      <div className="whitespace-pre-wrap text-wood/60 leading-relaxed text-base italic font-serif">
-                        {selectedMeeting.rawTranscript}
-                      </div>
-                    </div>
-                  </section>
-                )}
-              </div>
-            </motion.div>
-
-          ) : (
-            /* ── Empty / home state ── */
-            <motion.div
-              key="empty"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="flex-1 flex flex-col items-center justify-start p-12 lg:p-20 text-center relative overflow-y-auto min-h-full pb-32"
-            >
-              <div className="absolute inset-0 opacity-10 pointer-events-none">
-                <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-sage blur-[150px] rounded-full" />
-                <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-terracotta blur-[150px] rounded-full" />
-              </div>
-
-              <div className="relative z-10 w-full max-w-4xl">
-                <div className="mb-12">
-                  <Logo className="w-32 h-32 mx-auto mb-8" />
-                  <h2 className="text-7xl font-serif font-bold tracking-tighter mb-4 text-forest leading-none">
-                    Sync<span className="text-terracotta italic">Lingua</span>
-                  </h2>
-                  <p className="text-wood/70 max-w-xl text-xl leading-relaxed font-serif italic mx-auto">
-                    捕捉對話中的靈魂。
-                  </p>
-                </div>
-
-                <div className="bg-white/80 backdrop-blur-md p-12 rounded-[64px] border border-wood/10 shadow-2xl shadow-forest/5 mb-16 relative group overflow-hidden">
-                  <div className="absolute inset-0 bg-gradient-to-br from-sage/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700" />
-                  <div className="relative z-10 space-y-10">
-                    <div className="space-y-4">
-                      <h3 className="text-3xl font-serif font-bold text-forest">準備好開始了嗎？</h3>
-                      <p className="text-wood/60 font-serif italic">在下方輸入會議背景，讓 AI 轉錄與分析更精準。</p>
-                    </div>
-                    <div className="max-w-md mx-auto space-y-6">
-                      <input
-                        type="text"
-                        placeholder="例如：產品週會、客戶訪談、創意發想..."
-                        value={contextHint}
-                        onChange={(e) => setContextHint(e.target.value)}
-                        className="w-full px-8 py-5 bg-paper/50 border-2 border-transparent focus:border-sage/20 rounded-3xl text-lg focus:ring-0 transition-all placeholder:text-sage/30 text-center font-serif italic shadow-inner"
-                      />
-                      <button
-                        onClick={isRecording ? stopRecording : startRecording}
-                        disabled={isProcessing && !isRecording}
-                        className={cn(
-                          'w-full py-8 rounded-[32px] font-bold text-2xl flex flex-col items-center justify-center gap-4 transition-all relative overflow-hidden group shadow-2xl',
-                          isRecording
-                            ? 'bg-terracotta text-white shadow-terracotta/30'
-                            : 'bg-forest text-white shadow-forest/30 hover:scale-[1.02] active:scale-[0.98]',
-                          (isProcessing && !isRecording) && 'opacity-50 cursor-not-allowed'
-                        )}
+                      {liveTranscript
+                        ? <div className="whitespace-pre-wrap text-forest/70 text-sm font-serif leading-relaxed max-h-60 overflow-y-auto">{liveTranscript}</div>
+                        : <div className="text-wood/40 text-sm italic font-serif">首段 3 分鐘完成後，逐字稿將即時顯示...</div>}
+                    </motion.div>
+                  )}
+                  {(selectedMeeting.transcript||liveTranscript) && !selectedMeeting.summary && !isRecording && (
+                    <motion.div initial={{ opacity:0, y:10 }} animate={{ opacity:1, y:0 }} className="mb-10">
+                      <button onClick={handleManualAnalysis} disabled={isProcessing}
+                        className={cn('w-full py-6 rounded-[24px] font-bold text-lg flex items-center justify-center gap-3 bg-forest text-white shadow-xl shadow-forest/20 hover:scale-[1.01] active:scale-[0.99] transition-all', isProcessing&&'opacity-50 cursor-not-allowed')}
                       >
-                        <div className="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity" />
-                        {isRecording ? (
-                          <div className="flex flex-col items-center gap-4">
-                            <motion.div
-                              animate={{ scale: [1, 1.2, 1], opacity: [1, 0.8, 1] }}
-                              transition={{ repeat: Infinity, duration: 1.5 }}
-                              className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center"
-                            >
-                              <div className="w-6 h-6 bg-white rounded-sm" />
-                            </motion.div>
-                            <div className="w-32 h-1 bg-white/20 rounded-full overflow-hidden mt-2">
-                              <motion.div
-                                className="h-full bg-white"
-                                animate={{ width: `${Math.min(audioVolume * 2, 100)}%` }}
-                                transition={{ type: 'spring', bounce: 0, duration: 0.1 }}
-                              />
-                            </div>
-                            <span className="tracking-[0.2em] uppercase text-sm">
-                              正在錄音 {format(recordingTime * 1000, 'mm:ss')}
-                            </span>
-                            {chunksProcessed > 0 && (
-                              <motion.span
-                                initial={{ opacity: 0, y: 4 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                className="text-[10px] text-white/70 font-serif italic flex items-center gap-1"
-                              >
-                                <Layers className="w-3 h-3" />
-                                已完成 {chunksProcessed} 段分段轉錄
-                                {isTranscribingChunk && <Loader2 className="w-3 h-3 animate-spin ml-1" />}
-                              </motion.span>
-                            )}
+                        {isProcessing ? <><Loader2 className="w-5 h-5 animate-spin" />正在生成...</> : <><Sparkles className="w-5 h-5" />一鍵生成會議紀錄</>}
+                      </button>
+                    </motion.div>
+                  )}
+                  {selectedMeeting.summary && (
+                    <div className="space-y-12 mb-12">
+                      <section>
+                        <div className="flex items-center gap-4 mb-8"><FileText className="w-5 h-5 text-terracotta" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-terracotta">會議總結</h4></div>
+                        <div className="bg-white p-12 rounded-[40px] border border-wood/10 shadow-sm"><div className="markdown-body"><ReactMarkdown>{selectedMeeting.summary}</ReactMarkdown></div></div>
+                      </section>
+                      {selectedMeeting.actionItems && selectedMeeting.actionItems.length > 0 && (
+                        <section>
+                          <div className="flex items-center gap-4 mb-8"><ListChecks className="w-5 h-5 text-forest" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-forest">行動項目</h4></div>
+                          <div className="space-y-3">
+                            {selectedMeeting.actionItems.map((item,i) => (
+                              <div key={i} className="flex items-start gap-4 p-6 bg-white rounded-2xl border border-wood/10">
+                                <CheckCircle2 className="w-5 h-5 text-sage mt-0.5 shrink-0" />
+                                <span className="font-serif text-forest/80">{item}</span>
+                              </div>
+                            ))}
                           </div>
-                        ) : (
-                          <div className="flex flex-col items-center gap-4">
-                            <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center group-hover:bg-white/30 transition-colors">
-                              <Mic className="w-8 h-8" />
-                            </div>
-                            <span className="tracking-[0.2em] uppercase text-sm">啟動新會議錄製</span>
+                        </section>
+                      )}
+                    </div>
+                  )}
+                  {selectedMeeting.transcript && (
+                    <section>
+                      <div className="flex items-center gap-4 mb-8"><History className="w-5 h-5 text-wood" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-wood">{selectedMeeting.summary?'精華逐字稿':'完整逐字稿'}</h4></div>
+                      <div className="bg-white p-12 rounded-[40px] border border-wood/10"><div className="whitespace-pre-wrap text-forest/80 leading-relaxed text-base font-serif">{selectedMeeting.transcript}</div></div>
+                    </section>
+                  )}
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div key="empty" initial={{ opacity:0 }} animate={{ opacity:1 }}
+                className="flex flex-col items-center justify-center min-h-full p-20 text-center"
+              >
+                <Logo className="w-24 h-24 mx-auto mb-8" />
+                <h2 className="text-6xl font-serif font-bold tracking-tighter mb-4 text-forest">Sync<span className="text-terracotta italic">Lingua</span></h2>
+                <p className="text-wood/60 text-lg font-serif italic">從左側啟動錄音，或選取一筆會議紀錄。</p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <AnimatePresence>
+            {isProcessing && !isRecording && (
+              <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+                className="fixed inset-0 bg-forest/40 backdrop-blur-xl z-50 flex items-center justify-center p-6"
+              >
+                <div className="bg-white p-20 rounded-[64px] shadow-2xl max-w-xl w-full text-center border border-wood/10 relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-2 bg-paper">
+                    <motion.div initial={{ x:'-100%' }} animate={{ x:'100%' }} transition={{ repeat: Infinity, duration: 2, ease:'easeInOut' }} className="w-full h-full bg-terracotta" />
+                  </div>
+                  <Logo className="w-20 h-20 mx-auto mb-10" />
+                  <h3 className="text-5xl font-serif font-bold mb-6 text-forest tracking-tight">正在編織紀錄...</h3>
+                  <p className="text-wood/80 font-serif italic text-xl">正在完成最後一段轉錄，請稍候。</p>
+                  <div className="mt-12 flex justify-center gap-2">
+                    {[0,1,2].map(i => <motion.div key={i} className="w-2 h-2 rounded-full bg-sage" animate={{ scale:[1,1.5,1], opacity:[0.3,1,0.3] }} transition={{ repeat: Infinity, duration:1, delay:i*0.2 }} />)}
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </main>
+      </div>
+
+      {/* ════════════════════════════════════════════════════════════════════════
+          MOBILE  (below md)
+      ════════════════════════════════════════════════════════════════════════ */}
+      <div className="flex flex-col md:hidden min-h-[100dvh]">
+
+        {/* Top bar */}
+        <header className="sticky top-0 z-30 bg-paper/92 backdrop-blur-md border-b border-wood/5 px-5 safe-top" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
+          <div className="flex items-center justify-between py-3">
+            <div className="flex items-center gap-2.5">
+              <Logo className="w-7 h-7" />
+              <span className="font-serif font-bold text-xl tracking-tighter text-forest">SyncLingua</span>
+            </div>
+            {isRecording && (
+              <motion.div animate={{ opacity:[1,0.4,1] }} transition={{ repeat: Infinity, duration: 1.2 }}
+                className="flex items-center gap-1.5 px-3 py-1 bg-terracotta/10 rounded-full"
+              >
+                <div className="w-2 h-2 rounded-full bg-terracotta" />
+                <span className="text-[11px] font-bold text-terracotta uppercase tracking-wider">{format(recordingTime*1000,'mm:ss')}</span>
+              </motion.div>
+            )}
+          </div>
+        </header>
+
+        {/* Tab content */}
+        <div className="flex-1 overflow-hidden relative">
+          <AnimatePresence mode="wait">
+
+            {/* ─── RECORD tab ─── */}
+            {activeTab === 'record' && (
+              <motion.div key="record" initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+                transition={{ duration:0.2 }} className="absolute inset-0 overflow-y-auto pb-24"
+              >
+                {isRecording ? (
+                  /* FULLSCREEN RECORDING */
+                  <div className="min-h-full flex flex-col bg-forest relative overflow-hidden">
+                    <div className="absolute inset-0 pointer-events-none">
+                      <div className="absolute -top-20 -right-20 w-80 h-80 bg-sage/20 blur-[100px] rounded-full" />
+                      <div className="absolute bottom-10 -left-20 w-80 h-80 bg-terracotta/15 blur-[100px] rounded-full" />
+                    </div>
+                    <div className="relative z-10 flex flex-col items-center justify-center flex-1 px-8 gap-7 py-10">
+                      {/* Timer */}
+                      <div className="text-center">
+                        <div className="text-7xl font-serif font-bold text-white tracking-tighter tabular-nums leading-none">
+                          {format(recordingTime*1000,'mm:ss')}
+                        </div>
+                        <div className="text-white/40 text-xs uppercase tracking-[0.3em] mt-3 font-bold">正在錄音</div>
+                      </div>
+                      {/* Waveform */}
+                      <Waveform volume={audioVolume} active={isRecording} />
+                      {/* Status badges */}
+                      <div className="flex flex-col items-center gap-3">
+                        {contextHint && (
+                          <div className="px-4 py-2 bg-white/10 rounded-full">
+                            <span className="text-white/60 text-xs font-serif italic">{contextHint}</span>
                           </div>
                         )}
+                        {chunksProcessed > 0 && (
+                          <motion.div initial={{ opacity:0, scale:0.9 }} animate={{ opacity:1, scale:1 }}
+                            className="flex items-center gap-2 px-4 py-2 bg-white/10 rounded-full"
+                          >
+                            <Layers className="w-3.5 h-3.5 text-white/60" />
+                            <span className="text-white/60 text-xs font-bold">已完成 {chunksProcessed} 段轉錄</span>
+                            {isTranscribingChunk && <Loader2 className="w-3.5 h-3.5 text-white/50 animate-spin" />}
+                          </motion.div>
+                        )}
+                      </div>
+                      {/* Live transcript peek */}
+                      {liveTranscript && (
+                        <div className="w-full bg-white/8 rounded-2xl p-4 max-h-28 overflow-hidden relative">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-white/40 mb-1.5">即時逐字稿</div>
+                          <p className="text-white/60 text-xs font-serif leading-relaxed line-clamp-3">{liveTranscript}</p>
+                          <div className="absolute bottom-0 inset-x-0 h-8 bg-gradient-to-t from-forest/80 to-transparent rounded-b-2xl" />
+                        </div>
+                      )}
+                      {/* STOP button — large, thumb-friendly */}
+                      <button onClick={stopRecording}
+                        className="w-28 h-28 bg-white rounded-full flex flex-col items-center justify-center shadow-2xl shadow-black/30 active:scale-90 transition-transform mt-2"
+                      >
+                        <div className="w-9 h-9 bg-terracotta rounded-xl" />
+                        <span className="text-[11px] text-terracotta font-bold uppercase tracking-wider mt-2">停止</span>
                       </button>
                     </div>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 w-full">
-                  {[
-                    { icon: Mic, title: '自動分段', desc: '每 3 分鐘自動切段上傳，突破 Whisper 25MB 限制，支援無限長度錄音。' },
-                    { icon: FileText, title: '即時轉錄', desc: 'Whisper 模型邊錄邊轉，完成時逐字稿已全數就緒。' },
-                    { icon: ListChecks, title: '一鍵紀錄', desc: '錄音結束後，GPT-4o 一鍵生成精華逐字稿、總結與行動項目。' }
-                  ].map((feature, i) => (
-                    <div key={i} className="bg-white/40 backdrop-blur-sm p-8 rounded-[40px] border border-wood/5 text-left hover:bg-white/60 transition-all group">
-                      <div className="w-12 h-12 rounded-2xl bg-paper flex items-center justify-center mb-6 group-hover:bg-sage/10 transition-all">
-                        <feature.icon className="w-6 h-6 text-forest" />
-                      </div>
-                      <h4 className="font-serif font-bold text-xl mb-2 text-forest">{feature.title}</h4>
-                      <p className="text-wood/70 text-sm leading-relaxed font-serif italic">{feature.desc}</p>
+                ) : (
+                  /* IDLE */
+                  <div className="flex flex-col items-center px-5 pt-8 gap-6">
+                    <div className="text-center">
+                      <h2 className="text-3xl font-serif font-bold tracking-tighter text-forest">準備錄音</h2>
+                      <p className="text-wood/60 text-sm font-serif italic mt-1.5">每 3 分鐘自動分段，支援長時間會議</p>
                     </div>
+
+                    {/* Context hint accordion */}
+                    <div className="w-full max-w-sm">
+                      <button onClick={() => setShowContextInput(!showContextInput)}
+                        className="w-full flex items-center justify-between px-5 py-3.5 bg-white rounded-2xl border border-wood/10 shadow-sm"
+                      >
+                        <div className="flex-1 min-w-0 text-left">
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-sage">會議背景（選填）</div>
+                          <div className={cn('text-sm mt-0.5 truncate', contextHint ? 'text-forest font-serif italic' : 'text-sage/40')}>
+                            {contextHint || '輸入以提升轉錄精準度...'}
+                          </div>
+                        </div>
+                        <ChevronDown className={cn('w-4 h-4 text-sage/50 transition-transform ml-2 shrink-0', showContextInput && 'rotate-180')} />
+                      </button>
+                      <AnimatePresence>
+                        {showContextInput && (
+                          <motion.div initial={{ height:0, opacity:0 }} animate={{ height:'auto', opacity:1 }}
+                            exit={{ height:0, opacity:0 }} transition={{ duration:0.2 }} className="overflow-hidden mt-2"
+                          >
+                            <input type="text" autoFocus placeholder="例如：產品週會、客戶訪談..."
+                              value={contextHint} onChange={e => setContextHint(e.target.value)}
+                              className="w-full px-5 py-3.5 bg-white rounded-2xl border border-wood/10 text-sm focus:ring-0 focus:border-sage/30 placeholder:text-sage/40 font-serif"
+                            />
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+
+                    {/* Big record button */}
+                    <button onClick={startRecording} disabled={isProcessing}
+                      className={cn('w-40 h-40 rounded-full flex flex-col items-center justify-center shadow-2xl shadow-forest/25 bg-forest text-white active:scale-95 transition-transform', isProcessing && 'opacity-50 cursor-not-allowed')}
+                    >
+                      <Mic className="w-14 h-14 mb-1" />
+                      <span className="text-xs font-bold uppercase tracking-widest">開始錄音</span>
+                    </button>
+
+                    {/* Feature list */}
+                    <div className="w-full max-w-sm space-y-2.5">
+                      {[
+                        { icon: Layers, title: '自動分段', desc: '每 3 分鐘切段，突破 25MB 限制' },
+                        { icon: FileText, title: '即時轉錄', desc: 'Whisper 邊錄邊轉' },
+                        { icon: Sparkles, title: '一鍵紀錄', desc: 'GPT-4o 生成摘要與行動項目' },
+                      ].map((f,i) => (
+                        <div key={i} className="flex items-center gap-4 p-4 bg-white rounded-2xl border border-wood/5 shadow-sm">
+                          <div className="w-10 h-10 rounded-xl bg-paper flex items-center justify-center shrink-0">
+                            <f.icon className="w-5 h-5 text-forest" />
+                          </div>
+                          <div>
+                            <div className="font-serif font-bold text-sm text-forest">{f.title}</div>
+                            <div className="text-wood/60 text-xs font-serif italic">{f.desc}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </motion.div>
+            )}
+
+            {/* ─── HISTORY tab ─── */}
+            {activeTab === 'history' && (
+              <motion.div key="history" initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+                transition={{ duration:0.2 }} className="absolute inset-0 overflow-y-auto pb-24"
+              >
+                <div className="px-5 pt-5 space-y-3">
+                  <h2 className="font-serif font-bold text-2xl text-forest">會議記錄</h2>
+                  <div className="relative">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-sage" />
+                    <input type="text" placeholder="搜尋紀錄..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                      className="w-full pl-11 pr-4 py-3 bg-white rounded-xl border border-wood/5 shadow-sm text-sm focus:ring-0 focus:border-sage/20 placeholder:text-sage/50" />
+                  </div>
+                  {filtered.length === 0 ? (
+                    <div className="py-20 text-center">
+                      <BookOpen className="w-12 h-12 text-sage/25 mx-auto mb-4" />
+                      <div className="text-sage/50 text-sm font-serif italic">尚無會議紀錄</div>
+                    </div>
+                  ) : filtered.map(m => (
+                    <button key={m.id} onClick={() => setSelectedMeeting(m)}
+                      className="w-full text-left p-4 bg-white rounded-2xl border border-wood/5 shadow-sm active:bg-paper/60 transition-all"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className={cn('mt-1.5 w-2 h-2 rounded-full shrink-0',
+                          m.status==='completed'?'bg-forest': m.status==='recording'?'bg-sage animate-pulse': m.status==='error'?'bg-red-400':'bg-wood/20')} />
+                        <div className="flex-1 min-w-0">
+                          <div className="font-serif font-bold text-base text-forest truncate">{m.title}</div>
+                          <div className="text-[11px] text-wood/60 mt-1 flex items-center gap-1.5">
+                            <Clock className="w-3 h-3" />{format(m.date.toDate(),'yyyy年MM月dd日 HH:mm')}
+                          </div>
+                          {m.summary && (
+                            <p className="text-xs text-wood/50 mt-2 font-serif italic line-clamp-2">
+                              {m.summary.replace(/[#*`]/g,'').substring(0,80)}...
+                            </p>
+                          )}
+                          {m.contextHint && (
+                            <span className="inline-block mt-2 px-2.5 py-0.5 bg-sage/10 rounded-full text-[10px] text-sage font-bold uppercase tracking-wider">
+                              {m.contextHint}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </button>
                   ))}
                 </div>
-              </div>
-            </motion.div>
+              </motion.div>
+            )}
+
+            {/* ─── PROFILE tab ─── */}
+            {activeTab === 'profile' && (
+              <motion.div key="profile" initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+                transition={{ duration:0.2 }} className="absolute inset-0 overflow-y-auto pb-24"
+              >
+                <div className="px-5 pt-5 space-y-4">
+                  <h2 className="font-serif font-bold text-2xl text-forest">我的帳號</h2>
+                  <div className="bg-white rounded-2xl border border-wood/5 shadow-sm p-5">
+                    <div className="flex items-center gap-4">
+                      <img src={user.photoURL||`https://ui-avatars.com/api/?name=${user.displayName}`} alt="" referrerPolicy="no-referrer"
+                        className="w-14 h-14 rounded-full border-2 border-white shadow-md" />
+                      <div>
+                        <div className="font-bold text-forest text-base">{user.displayName}</div>
+                        <div className="text-wood/60 text-xs mt-0.5">{user.email}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-white rounded-2xl border border-wood/5 shadow-sm overflow-hidden">
+                    <div className="px-5 py-3.5 border-b border-wood/5">
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-sage">使用統計</div>
+                    </div>
+                    <div className="grid grid-cols-2 divide-x divide-wood/5">
+                      <div className="px-5 py-5 text-center">
+                        <div className="text-4xl font-serif font-bold text-forest">{meetings.length}</div>
+                        <div className="text-xs text-wood/60 mt-1">會議紀錄</div>
+                      </div>
+                      <div className="px-5 py-5 text-center">
+                        <div className="text-4xl font-serif font-bold text-forest">{meetings.filter(m=>m.summary).length}</div>
+                        <div className="text-xs text-wood/60 mt-1">已生成摘要</div>
+                      </div>
+                    </div>
+                  </div>
+                  <button onClick={() => logout()}
+                    className="w-full py-4 rounded-2xl border-2 border-terracotta/20 text-terracotta font-bold text-sm flex items-center justify-center gap-2 active:bg-terracotta/5 transition-all"
+                  >
+                    <LogOut className="w-4 h-4" />登出
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* ── Bottom navigation ── */}
+        <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-wood/5"
+          style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+          <div className="flex items-center justify-around px-2 pt-2 pb-2">
+            {([
+              { key:'record', label:'錄音', icon: <Mic className="w-5 h-5" /> },
+              { key:'history', label:'記錄', icon: <BookOpen className="w-5 h-5" />, badge: meetings.length },
+              { key:'profile', label:'我的', icon: (
+                <img src={user.photoURL||`https://ui-avatars.com/api/?name=${user.displayName}`} alt="" referrerPolicy="no-referrer"
+                  className={cn('w-5 h-5 rounded-full border-2 transition-all', activeTab==='profile'?'border-forest':'border-transparent')} />
+              )},
+            ] as const).map(tab => (
+              <button key={tab.key} onClick={() => setActiveTab(tab.key as any)}
+                className={cn('flex flex-col items-center gap-1 flex-1 py-2 rounded-xl transition-all relative', activeTab===tab.key?'text-forest':'text-sage/50')}
+              >
+                {tab.icon}
+                <span className="text-[10px] font-bold uppercase tracking-wider">{tab.label}</span>
+                {'badge' in tab && tab.badge > 0 && (
+                  <span className="absolute top-1.5 right-4 min-w-[16px] h-4 bg-terracotta rounded-full text-[9px] text-white font-bold flex items-center justify-center px-1">
+                    {tab.badge > 99 ? '99' : tab.badge}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        {/* ── Meeting detail bottom sheet ── */}
+        <AnimatePresence>
+          {selectedMeeting && (
+            <>
+              <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+                className="fixed inset-0 z-50 bg-forest/30 backdrop-blur-sm"
+                onClick={() => setSelectedMeeting(null)} />
+              <motion.div
+                initial={{ y:'100%' }} animate={{ y:0 }} exit={{ y:'100%' }}
+                transition={{ type:'spring', damping:32, stiffness:320 }}
+                className="fixed bottom-0 left-0 right-0 z-50 bg-paper rounded-t-[28px] shadow-2xl overflow-hidden"
+                style={{ maxHeight:'92dvh' }}
+              >
+                <div className="flex justify-center pt-3 pb-0.5">
+                  <div className="w-10 h-1 bg-wood/20 rounded-full" />
+                </div>
+                <div className="overflow-y-auto" style={{ maxHeight:'calc(92dvh - 20px)' }}>
+                  <MeetingDetailContent m={selectedMeeting} />
+                </div>
+              </motion.div>
+            </>
           )}
         </AnimatePresence>
 
-        {/* ── Processing overlay (final drain only) ── */}
+        {/* Mobile processing overlay */}
         <AnimatePresence>
           {isProcessing && !isRecording && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-forest/40 backdrop-blur-xl z-50 flex items-center justify-center p-6"
+            <motion.div initial={{ opacity:0 }} animate={{ opacity:1 }} exit={{ opacity:0 }}
+              className="fixed inset-0 z-[60] bg-forest/60 backdrop-blur-xl flex items-end justify-center pb-10 px-6"
             >
-              <div className="bg-white p-20 rounded-[64px] shadow-2xl max-w-xl w-full text-center border border-wood/10 relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-full h-2 bg-paper">
-                  <motion.div
-                    initial={{ x: '-100%' }}
-                    animate={{ x: '100%' }}
-                    transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
-                    className="w-full h-full bg-terracotta"
-                  />
-                </div>
-                <motion.div
-                  animate={{ scale: [1, 1.05, 1], rotate: [0, 5, -5, 0] }}
-                  transition={{ repeat: Infinity, duration: 4 }}
-                  className="w-32 h-32 bg-paper rounded-[40px] flex items-center justify-center mx-auto mb-12 shadow-inner"
-                >
-                  <Logo className="w-20 h-20" />
-                </motion.div>
-                <h3 className="text-5xl font-serif font-bold mb-6 text-forest tracking-tight">正在編織紀錄...</h3>
-                <p className="text-wood/80 font-serif italic text-xl leading-relaxed">
-                  正在完成最後一段轉錄，請稍候。
-                </p>
-                <div className="mt-12 flex justify-center gap-2">
-                  {[0, 1, 2].map(i => (
-                    <motion.div
-                      key={i}
-                      animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }}
-                      transition={{ repeat: Infinity, duration: 1, delay: i * 0.2 }}
-                      className="w-2 h-2 rounded-full bg-sage"
-                    />
+              <motion.div initial={{ y:60, opacity:0 }} animate={{ y:0, opacity:1 }}
+                className="bg-white rounded-3xl p-8 w-full max-w-sm text-center shadow-2xl"
+              >
+                <motion.div animate={{ rotate:360 }} transition={{ repeat: Infinity, duration: 2.5, ease:'linear' }}
+                  className="w-12 h-12 border-4 border-forest/10 border-t-forest rounded-full mx-auto mb-5" />
+                <div className="font-serif font-bold text-xl text-forest mb-2">正在編織紀錄</div>
+                <div className="text-wood/60 text-sm font-serif italic">正在完成最後一段轉錄...</div>
+                <div className="mt-5 flex justify-center gap-1.5">
+                  {[0,1,2].map(i => (
+                    <motion.div key={i} className="w-1.5 h-1.5 rounded-full bg-sage"
+                      animate={{ scale:[1,1.5,1], opacity:[0.3,1,0.3] }}
+                      transition={{ repeat: Infinity, duration:1, delay:i*0.2 }} />
                   ))}
                 </div>
-              </div>
+              </motion.div>
             </motion.div>
           )}
         </AnimatePresence>
-      </main>
+      </div>
 
       <div id="error-portal" />
     </div>
   );
+
+  // ─── Meeting detail sheet content (defined inside to access state/handlers) ──
+  function MeetingDetailContent({ m }: { m: Meeting }) {
+    return (
+      <div className="px-5 pt-2 pb-10 space-y-4">
+        <div className="flex items-start justify-between">
+          <div className="flex-1 pr-3">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-sage mb-1">
+              {format(m.date.toDate(), 'yyyy年MM月dd日 HH:mm')}
+            </div>
+            <h3 className="font-serif font-bold text-xl text-forest leading-snug">{m.title}</h3>
+            {m.modelInfo && (
+              <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 bg-sage/10 rounded-full">
+                <div className="w-1.5 h-1.5 rounded-full bg-sage" />
+                <span className="text-[10px] font-bold uppercase tracking-wider text-sage">{m.modelInfo}</span>
+              </div>
+            )}
+          </div>
+          <button onClick={() => setSelectedMeeting(null)} className="p-2.5 bg-white rounded-xl border border-wood/10 active:bg-paper shrink-0">
+            <X className="w-4 h-4 text-wood" />
+          </button>
+        </div>
+
+        {isRecording && m.id === currentMeetingIdRef.current && (
+          <div className="p-4 bg-terracotta/5 border border-terracotta/15 rounded-2xl">
+            <div className="flex items-center gap-2 mb-2">
+              <motion.div className="w-2 h-2 rounded-full bg-terracotta" animate={{ scale:[1,1.5,1] }} transition={{ repeat: Infinity, duration: 1 }} />
+              <span className="text-xs font-bold uppercase tracking-widest text-terracotta">錄音中</span>
+              {isTranscribingChunk && <Loader2 className="w-3.5 h-3.5 text-wood/50 animate-spin ml-auto" />}
+            </div>
+            {liveTranscript
+              ? <p className="text-xs text-forest/70 font-serif leading-relaxed line-clamp-4">{liveTranscript}</p>
+              : <p className="text-xs text-wood/40 font-serif italic">首段完成後將顯示逐字稿...</p>}
+          </div>
+        )}
+
+        {(m.transcript || liveTranscript) && !m.summary && !isRecording && (
+          <button onClick={handleManualAnalysis} disabled={isProcessing}
+            className={cn('w-full py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2.5 bg-forest text-white shadow-lg shadow-forest/15 active:scale-[0.98] transition-all', isProcessing && 'opacity-50 cursor-not-allowed')}
+          >
+            {isProcessing ? <><Loader2 className="w-4 h-4 animate-spin" />生成中...</> : <><Sparkles className="w-4 h-4" />一鍵生成會議紀錄</>}
+          </button>
+        )}
+
+        {m.summary && (
+          <div>
+            <div className="flex items-center gap-2 mb-2.5"><FileText className="w-4 h-4 text-terracotta" /><span className="text-[10px] font-bold uppercase tracking-widest text-terracotta">會議總結</span></div>
+            <div className="bg-white p-4 rounded-2xl border border-wood/10"><div className="markdown-body text-sm"><ReactMarkdown>{m.summary}</ReactMarkdown></div></div>
+          </div>
+        )}
+
+        {m.actionItems && m.actionItems.length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-2.5"><ListChecks className="w-4 h-4 text-forest" /><span className="text-[10px] font-bold uppercase tracking-widest text-forest">行動項目</span></div>
+            <div className="space-y-2">
+              {m.actionItems.map((item,i) => (
+                <div key={i} className="flex items-start gap-3 p-3.5 bg-white rounded-xl border border-wood/10">
+                  <CheckCircle2 className="w-4 h-4 text-sage mt-0.5 shrink-0" />
+                  <span className="font-serif text-forest/80 text-sm">{item}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {m.transcript && (
+          <div>
+            <div className="flex items-center gap-2 mb-2.5"><History className="w-4 h-4 text-wood" /><span className="text-[10px] font-bold uppercase tracking-widest text-wood">{m.summary?'精華逐字稿':'完整逐字稿'}</span></div>
+            <div className="bg-white p-4 rounded-2xl border border-wood/10 max-h-60 overflow-y-auto">
+              <p className="whitespace-pre-wrap text-forest/80 text-sm font-serif leading-relaxed">{m.transcript}</p>
+            </div>
+          </div>
+        )}
+
+        <button onClick={(e) => { deleteMeeting(m.id, e); setSelectedMeeting(null); }}
+          className="w-full py-3.5 rounded-2xl border-2 border-terracotta/20 text-terracotta/80 font-bold text-sm flex items-center justify-center gap-2 active:bg-terracotta/5 transition-all"
+        >
+          <Trash2 className="w-4 h-4" />刪除此紀錄
+        </button>
+      </div>
+    );
+  }
 }

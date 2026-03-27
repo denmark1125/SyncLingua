@@ -312,7 +312,7 @@ export default function App() {
         >
           <UserIcon className="w-5 h-5" />使用 Google 帳號開始
         </button>
-        <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-sage font-bold">AI-Powered · 自動分段 · 無限錄音</div>
+        <div className="mt-6 text-[10px] uppercase tracking-[0.3em] text-sage font-bold">AI-Powered · 即時轉錄 · 無限錄音</div>
       </motion.div>
     </div>
   );
@@ -354,7 +354,7 @@ export default function App() {
           </div>
           {liveTranscript
             ? <p className="text-xs text-forest/70 font-serif leading-relaxed line-clamp-4">{liveTranscript}</p>
-            : <p className="text-xs text-wood/40 font-serif italic">首段完成後將顯示逐字稿...</p>}
+            : <p className="text-xs text-wood/40 font-serif italic">錄音中，逐字稿轉錄完成後將顯示於此...</p>}
         </div>
       )}
 
@@ -543,12 +543,12 @@ export default function App() {
                     >
                       <div className="flex items-center gap-3 mb-4">
                         <motion.div className="w-2 h-2 rounded-full bg-terracotta" animate={{ scale:[1,1.5,1] }} transition={{ repeat: Infinity, duration: 1 }} />
-                        <span className="text-xs font-bold uppercase tracking-widest text-terracotta">錄音中 — 每 3 分鐘自動轉錄</span>
+                        <span className="text-xs font-bold uppercase tracking-widest text-terracotta">錄音中</span>
                         {isTranscribingChunk && <span className="flex items-center gap-1 text-[10px] text-wood/60 ml-2"><Loader2 className="w-3 h-3 animate-spin" />轉錄中...</span>}
                       </div>
                       {liveTranscript
                         ? <div className="whitespace-pre-wrap text-forest/70 text-sm font-serif leading-relaxed max-h-60 overflow-y-auto">{liveTranscript}</div>
-                        : <div className="text-wood/40 text-sm italic font-serif">首段 3 分鐘完成後，逐字稿將即時顯示...</div>}
+                        : <div className="text-wood/40 text-sm italic font-serif">錄音完成後，逐字稿將顯示於此...</div>}
                     </motion.div>
                   )}
                   {(selectedMeeting.transcript||liveTranscript) && !selectedMeeting.summary && !isRecording && (
@@ -709,7 +709,7 @@ export default function App() {
                   <div className="flex flex-col items-center px-5 pt-8 gap-6">
                     <div className="text-center">
                       <h2 className="text-3xl font-serif font-bold tracking-tighter text-forest">準備錄音</h2>
-                      <p className="text-wood/60 text-sm font-serif italic mt-1.5">每 3 分鐘自動分段，支援長時間會議</p>
+                      <p className="text-wood/60 text-sm font-serif italic mt-1.5">按下按鈕即可開始錄音</p>
                     </div>
 
                     {/* Context hint accordion */}
@@ -750,7 +750,7 @@ export default function App() {
                     {/* Feature list */}
                     <div className="w-full max-w-sm space-y-2.5">
                       {[
-                        { icon: Layers, title: '自動分段', desc: '每 3 分鐘切段，突破 25MB 限制' },
+                        { icon: Layers, title: '智慧分段', desc: '自動切段上傳，支援長時間錄音' },
                         { icon: FileText, title: '即時轉錄', desc: 'Whisper 邊錄邊轉' },
                         { icon: Sparkles, title: '一鍵紀錄', desc: 'GPT-4o 生成摘要與行動項目' },
                       ].map((f,i) => (
@@ -799,7 +799,7 @@ export default function App() {
                           <div className="text-[11px] text-wood/60 mt-1 flex items-center gap-1.5">
                             <Clock className="w-3 h-3" />{format(m.date.toDate(),'yyyy年MM月dd日 HH:mm')}
                           </div>
-                          {m.summary && (
+                          {typeof m.summary === 'string' && m.summary && (
                             <p className="text-xs text-wood/50 mt-2 font-serif italic line-clamp-2">
                               {m.summary.replace(/[#*`]/g,'').substring(0,80)}...
                             </p>

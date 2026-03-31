@@ -261,63 +261,55 @@ export function mergeChunkTranscripts(chunkTranscripts: string[]): string {
   return chunkTranscripts.filter(t => t?.trim()).join('\n');
 }
 
-// ─── Step 2: Analyze (polish + summary + action items) ────────────────────────
+
+// ─── Step 2: Analyze (highlights + decisions + action items) ──────────────────
 export async function analyzeTranscript(
   transcript: string,
   contextHint?: string
 ): Promise<TranscriptionResult> {
   const openai = await getOpenAI();
 
-  const MAX_TRANSCRIPT_CHARS = 80000;
-  const trimmedTranscript = transcript.length > MAX_TRANSCRIPT_CHARS
-    ? transcript.slice(0, MAX_TRANSCRIPT_CHARS) + '\n\n[...逐字稿過長，已截取前段進行分析]'
+  // Keep input under 60k chars — leaves room for 8k token output
+  const MAX_INPUT_CHARS = 60000;
+  const trimmedTranscript = transcript.length > MAX_INPUT_CHARS
+    ? transcript.slice(0, MAX_INPUT_CHARS) + '\n\n[...逐字稿過長，已截取前段]'
     : transcript;
 
-  const systemPrompt = `你是一位專業的會議記錄整理師。
-${contextHint ? `本次會議背景：${contextHint}。` : ''}
+  const systemPrompt = `你是一位專業的會議記錄整理師。${contextHint ? `\n本次會議背景：${contextHint}。` : ''}
 
-你的工作原則：
-1. 【忠實原文】所有輸出內容必須直接來自逐字稿，不推測、不創造、不補充沒說過的話
-2. 【適度整理逐字稿】去除口頭禪（嗯、啊、呃、就是說）和明顯重複，但保留每個人說過的所有實質內容與原始措辭
-3. 【主題分組】將對話依照討論主題自然分組，每組列出該主題下的具體重點（直接引用或接近原文）
-4. 【決議與行動】只記錄明確說出的決定和承諾，不推斷`;
+工作原則：
+1. 所有內容必須直接來自逐字稿，不推測、不創造
+2. 主題分組：依討論主題自然分組，每組條列重點（接近原文措辭）
+3. 決議：只記錄明確說出「決定、確定、就這樣」的內容
+4. 行動項目：記錄明確的分工承諾
+5. 回傳的 JSON 必須完整正確`;
 
-  const userPrompt = `請整理以下會議逐字稿：
+  // ⚠️ 不要求 GPT-4o 在 JSON 裡重新輸出完整逐字稿
+  // 那樣會把大部分 token 用完，導致 highlights 被截斷
+  const userPrompt = `分析以下會議逐字稿，只輸出重點彙整、決議和行動項目：
 
 ${trimmedTranscript}
 
-請以 JSON 格式返回（不含 markdown 代碼框）：
+以 JSON 格式返回（不含 markdown 代碼框）：
 {
-  "transcript": "適度整理後的逐字稿（去除口頭禪，保留說話者角色標籤和時間戳記，保留所有實質內容）",
   "highlights": [
     {
-      "topic": "討論主題名稱（從對話中提取，不要自己命名）",
-      "points": [
-        "重點一（接近原文，說明是誰說的）",
-        "重點二",
-        "重點三"
-      ]
+      "topic": "討論主題（從對話中提取）",
+      "points": ["重點一（說明是誰說的，接近原文）", "重點二"]
     }
   ],
-  "decisions": [
-    "明確決議一（逐字稿中有明確說出的決定）"
-  ],
-  "actionItems": [
-    "誰 → 做什麼（截止日期，若有提及）"
-  ]
+  "decisions": ["明確決議"],
+  "actionItems": ["誰 → 做什麼（截止日期）"]
 }
 
-注意：
-- highlights 的 points 直接從逐字稿擷取，不要改寫成摘要句
-- decisions 只填有明確說「決定」、「確定」、「就這樣」的內容
-- 若沒有明確決議或行動項目，對應陣列留空 []`;
+規則：points 盡量引用原文；沒有決議或行動項目就設為空陣列 []`;
 
   if (openaiApiKey && openai) {
     try {
       const res = await openai.chat.completions.create({
         model: 'gpt-4o',
-        temperature: 0.1,  // 低溫度確保忠實，不要自由發揮
-        max_tokens: 4096,
+        temperature: 0.1,
+        max_tokens: 8192,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
@@ -325,42 +317,33 @@ ${trimmedTranscript}
         response_format: { type: 'json_object' },
       });
 
-      const raw = res.choices[0].message.content ?? '{}';
+      const choice = res.choices[0];
+      if (choice.finish_reason === 'length') {
+        console.warn('[GPT-4o analyze] finish_reason=length — still truncated at 8192');
+      }
+
+      const raw = choice.message.content ?? '{}';
       let parsed: any = {};
       try {
         parsed = JSON.parse(raw);
-      } catch {
-        console.warn('[GPT-4o analyze] JSON parse failed, using fallback');
-        parsed = {
-          transcript: trimmedTranscript,
-          highlights: [{ topic: '（解析失敗）', points: ['請重新生成'] }],
-          decisions: [],
-          actionItems: [],
-        };
-      }
-
-      // Build summary field for backward compatibility with UI rendering
-      const summaryLines: string[] = [];
-      if (parsed.highlights?.length) {
-        for (const h of parsed.highlights) {
-          summaryLines.push(`## ${h.topic}`);
-          for (const p of h.points ?? []) summaryLines.push(`- ${p}`);
-          summaryLines.push('');
+      } catch (parseErr) {
+        console.warn('[GPT-4o analyze] JSON parse failed:', parseErr);
+        // Try partial recovery: close any open structure
+        try {
+          const fixed = raw.replace(/,?\s*$/, '') + ']}';
+          parsed = JSON.parse(fixed);
+        } catch {
+          parsed = {};
         }
       }
-      if (parsed.decisions?.length) {
-        summaryLines.push('## 決議事項');
-        for (const d of parsed.decisions) summaryLines.push(`- ${d}`);
-      }
-      parsed.summary = summaryLines.join('\n').trim();
 
-      return { ...parsed, rawTranscript: transcript, modelInfo: 'GPT-4o' };
+      return buildResult(transcript, parsed, 'GPT-4o');
     } catch (err) {
       console.error('[GPT-4o analyze] error:', err);
     }
   }
 
-  // Gemini fallback
+  // ── Gemini fallback ───────────────────────────────────────────────────────
   const ai = getGemini();
   if (!ai) throw new Error('沒有可用的 API 金鑰（OpenAI / Gemini 均未設定）');
 
@@ -374,27 +357,41 @@ ${trimmedTranscript}
   try {
     parsed = JSON.parse(res.text ?? '{}');
   } catch {
-    parsed = {
-      transcript: trimmedTranscript,
-      highlights: [{ topic: '（解析失敗）', points: ['請重新生成'] }],
-      decisions: [],
-      actionItems: [],
-    };
+    console.warn('[Gemini analyze] JSON parse failed');
   }
 
-  const summaryLines: string[] = [];
-  if (parsed.highlights?.length) {
-    for (const h of parsed.highlights) {
-      summaryLines.push(`## ${h.topic}`);
-      for (const p of h.points ?? []) summaryLines.push(`- ${p}`);
-      summaryLines.push('');
-    }
-  }
-  if (parsed.decisions?.length) {
-    summaryLines.push('## 決議事項');
-    for (const d of parsed.decisions) summaryLines.push(`- ${d}`);
-  }
-  parsed.summary = summaryLines.join('\n').trim();
+  return buildResult(transcript, parsed, 'Gemini');
+}
 
-  return { ...parsed, rawTranscript: transcript, modelInfo: 'Gemini' };
+// ─── Helper: assemble TranscriptionResult from parsed JSON ───────────────────
+function buildResult(
+  originalTranscript: string,
+  parsed: any,
+  modelInfo: string
+): TranscriptionResult {
+  const highlights: { topic: string; points: string[] }[] = parsed.highlights ?? [];
+  const decisions: string[] = parsed.decisions ?? [];
+  const actionItems: string[] = parsed.actionItems ?? [];
+
+  // Build summary string for backward compat
+  const lines: string[] = [];
+  for (const h of highlights) {
+    lines.push(`## ${h.topic}`);
+    for (const p of h.points ?? []) lines.push(`- ${p}`);
+    lines.push('');
+  }
+  if (decisions.length) {
+    lines.push('## 決議事項');
+    for (const d of decisions) lines.push(`- ${d}`);
+  }
+
+  return {
+    transcript: originalTranscript,
+    rawTranscript: originalTranscript,
+    highlights,
+    decisions,
+    actionItems,
+    summary: lines.join('\n').trim(),
+    modelInfo,
+  };
 }

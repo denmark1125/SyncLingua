@@ -16,7 +16,7 @@ import {
 import {
   Mic, StopCircle, FileText, ListChecks, History, Trash2, LogOut,
   CheckCircle2, Clock, User as UserIcon, Search, X, Loader2, Layers,
-  ChevronDown, Sparkles, BookOpen
+  ChevronDown, Sparkles, BookOpen, Copy, Download, Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -34,7 +34,10 @@ const CHUNK_INTERVAL_MS = 3 * 60 * 1000;
 interface Meeting {
   id: string; userId: string; title: string; date: Timestamp;
   duration?: number; transcript?: string; rawTranscript?: string;
-  summary?: string; actionItems?: string[]; modelInfo?: string;
+  summary?: string;
+  highlights?: { topic: string; points: string[] }[];
+  decisions?: string[];
+  actionItems?: string[]; modelInfo?: string;
   contextHint?: string; status: 'recording' | 'processing' | 'completed' | 'error';
 }
 
@@ -259,16 +262,67 @@ export default function App() {
     streamRef.current = null;
   };
 
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const copyTranscript = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // Fallback for older browsers
+      const el = document.createElement('textarea');
+      el.value = text;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    }
+  };
+
+  const downloadTranscript = (text: string, title: string) => {
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title.replace(/[/\\?%*:|"<>]/g, '-')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleManualAnalysis = async () => {
     const tx = selectedMeeting?.rawTranscript || liveTranscript;
     if (!selectedMeeting || !tx) return;
     setIsProcessing(true);
     try {
       const r = await analyzeTranscript(tx, selectedMeeting.contextHint);
-      await updateDoc(doc(db,'meetings',selectedMeeting.id), { transcript: r.transcript, summary: r.summary, actionItems: r.actionItems, modelInfo: r.modelInfo });
-      setSelectedMeeting(p => p ? { ...p, transcript: r.transcript, summary: r.summary, actionItems: r.actionItems, modelInfo: r.modelInfo } : null);
-    } catch { alert('AI 分析失敗，請稍後再試。'); }
-    finally { setIsProcessing(false); }
+      await updateDoc(doc(db,'meetings',selectedMeeting.id), {
+        transcript: r.transcript,
+        summary: r.summary,
+        highlights: r.highlights ?? [],
+        decisions: r.decisions ?? [],
+        actionItems: r.actionItems ?? [],
+        modelInfo: r.modelInfo
+      });
+      setSelectedMeeting(p => p ? {
+        ...p,
+        transcript: r.transcript,
+        summary: r.summary,
+        highlights: r.highlights,
+        decisions: r.decisions,
+        actionItems: r.actionItems,
+        modelInfo: r.modelInfo
+      } : null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`AI 分析失敗：${msg.substring(0, 120)}`);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const deleteMeeting = async (id: string, e: React.MouseEvent) => {
@@ -368,7 +422,51 @@ export default function App() {
       )}
 
       {/* Summary */}
-      {m.summary && (
+      {/* Highlights — topic grouped key points */}
+      {m.highlights && m.highlights.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <FileText className="w-4 h-4 text-terracotta" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-terracotta">重點彙整</span>
+          </div>
+          {m.highlights.map((h, i) => (
+            <div key={i} className="bg-white rounded-2xl border border-wood/10 overflow-hidden">
+              <div className="px-4 py-2.5 bg-terracotta/5 border-b border-wood/5">
+                <span className="text-xs font-bold text-forest">{h.topic}</span>
+              </div>
+              <div className="px-4 py-3 space-y-2">
+                {h.points.map((p, j) => (
+                  <div key={j} className="flex items-start gap-2.5">
+                    <div className="w-1 h-1 rounded-full bg-wood/40 mt-1.5 shrink-0" />
+                    <span className="text-sm font-serif text-forest/80 leading-relaxed">{p}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Decisions */}
+      {m.decisions && m.decisions.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <CheckCircle2 className="w-4 h-4 text-sage" />
+            <span className="text-[10px] font-bold uppercase tracking-widest text-sage">決議事項</span>
+          </div>
+          <div className="space-y-2">
+            {m.decisions.map((d, i) => (
+              <div key={i} className="flex items-start gap-3 p-3.5 bg-sage/8 rounded-xl border border-sage/15">
+                <CheckCircle2 className="w-4 h-4 text-sage mt-0.5 shrink-0" />
+                <span className="font-serif text-forest/80 text-sm">{d}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Fallback: old summary format */}
+      {(!m.highlights || m.highlights.length === 0) && m.summary && (
         <div>
           <div className="flex items-center gap-2 mb-2.5">
             <FileText className="w-4 h-4 text-terracotta" />
@@ -390,7 +488,7 @@ export default function App() {
           <div className="space-y-2">
             {m.actionItems.map((item, i) => (
               <div key={i} className="flex items-start gap-3 p-3.5 bg-white rounded-xl border border-wood/10">
-                <CheckCircle2 className="w-4 h-4 text-sage mt-0.5 shrink-0" />
+                <div className="w-4 h-4 rounded border-2 border-wood/30 mt-0.5 shrink-0" />
                 <span className="font-serif text-forest/80 text-sm">{item}</span>
               </div>
             ))}
@@ -401,11 +499,30 @@ export default function App() {
       {/* Transcript */}
       {m.transcript && (
         <div>
-          <div className="flex items-center gap-2 mb-2.5">
-            <History className="w-4 h-4 text-wood" />
-            <span className="text-[10px] font-bold uppercase tracking-widest text-wood">
-              {m.summary ? '精華逐字稿' : '完整逐字稿'}
-            </span>
+          <div className="flex items-center justify-between mb-2.5">
+            <div className="flex items-center gap-2">
+              <History className="w-4 h-4 text-wood" />
+              <span className="text-[10px] font-bold uppercase tracking-widest text-wood">
+                {m.summary ? '精華逐字稿' : '完整逐字稿'}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => copyTranscript(m.transcript!, m.id + '-mobile')}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-wood/10 text-wood/70 active:bg-paper transition-all"
+              >
+                {copiedId === m.id + '-mobile'
+                  ? <><Check className="w-3.5 h-3.5 text-sage" /><span className="text-[10px] font-bold">已複製</span></>
+                  : <><Copy className="w-3.5 h-3.5" /><span className="text-[10px] font-bold">複製</span></>
+                }
+              </button>
+              <button
+                onClick={() => downloadTranscript(m.transcript!, m.title)}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-white border border-wood/10 text-wood/70 active:bg-paper transition-all"
+              >
+                <Download className="w-3.5 h-3.5" /><span className="text-[10px] font-bold">.txt</span>
+              </button>
+            </div>
           </div>
           <div className="bg-white p-4 rounded-2xl border border-wood/10 max-h-64 overflow-y-auto">
             <p className="whitespace-pre-wrap text-forest/80 text-sm font-serif leading-relaxed">{m.transcript}</p>
@@ -560,30 +677,101 @@ export default function App() {
                       </button>
                     </motion.div>
                   )}
-                  {selectedMeeting.summary && (
+                  {/* Meeting analysis results */}
+                  {(selectedMeeting.highlights?.length || selectedMeeting.summary) && (
                     <div className="space-y-12 mb-12">
-                      <section>
-                        <div className="flex items-center gap-4 mb-8"><FileText className="w-5 h-5 text-terracotta" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-terracotta">會議總結</h4></div>
-                        <div className="bg-white p-12 rounded-[40px] border border-wood/10 shadow-sm"><div className="markdown-body"><ReactMarkdown>{selectedMeeting.summary}</ReactMarkdown></div></div>
-                      </section>
+
+                      {/* Highlights — topic grouped */}
+                      {selectedMeeting.highlights && selectedMeeting.highlights.length > 0 && (
+                        <section>
+                          <div className="flex items-center gap-4 mb-8">
+                            <FileText className="w-5 h-5 text-terracotta" />
+                            <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-terracotta">重點彙整</h4>
+                          </div>
+                          <div className="space-y-5">
+                            {selectedMeeting.highlights.map((h, i) => (
+                              <div key={i} className="bg-white rounded-[28px] border border-wood/10 shadow-sm overflow-hidden">
+                                <div className="px-8 py-4 bg-terracotta/5 border-b border-wood/5">
+                                  <span className="font-serif font-bold text-base text-forest">{h.topic}</span>
+                                </div>
+                                <div className="px-8 py-5 space-y-3">
+                                  {h.points.map((p, j) => (
+                                    <div key={j} className="flex items-start gap-4">
+                                      <div className="w-1.5 h-1.5 rounded-full bg-terracotta/50 mt-2.5 shrink-0" />
+                                      <span className="font-serif text-forest/80 leading-relaxed">{p}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+
+                      {/* Decisions */}
+                      {selectedMeeting.decisions && selectedMeeting.decisions.length > 0 && (
+                        <section>
+                          <div className="flex items-center gap-4 mb-8">
+                            <CheckCircle2 className="w-5 h-5 text-sage" />
+                            <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-sage">決議事項</h4>
+                          </div>
+                          <div className="space-y-3">
+                            {selectedMeeting.decisions.map((d, i) => (
+                              <div key={i} className="flex items-start gap-4 p-6 bg-sage/5 rounded-2xl border border-sage/15">
+                                <CheckCircle2 className="w-5 h-5 text-sage mt-0.5 shrink-0" />
+                                <span className="font-serif text-forest/80">{d}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+
+                      {/* Action items */}
                       {selectedMeeting.actionItems && selectedMeeting.actionItems.length > 0 && (
                         <section>
-                          <div className="flex items-center gap-4 mb-8"><ListChecks className="w-5 h-5 text-forest" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-forest">行動項目</h4></div>
+                          <div className="flex items-center gap-4 mb-8">
+                            <ListChecks className="w-5 h-5 text-forest" />
+                            <h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-forest">行動項目</h4>
+                          </div>
                           <div className="space-y-3">
-                            {selectedMeeting.actionItems.map((item,i) => (
+                            {selectedMeeting.actionItems.map((item, i) => (
                               <div key={i} className="flex items-start gap-4 p-6 bg-white rounded-2xl border border-wood/10">
-                                <CheckCircle2 className="w-5 h-5 text-sage mt-0.5 shrink-0" />
+                                <div className="w-5 h-5 rounded border-2 border-wood/30 mt-0.5 shrink-0" />
                                 <span className="font-serif text-forest/80">{item}</span>
                               </div>
                             ))}
                           </div>
                         </section>
                       )}
+
+                      {/* Fallback: old summary format for existing records */}
+                      {(!selectedMeeting.highlights || selectedMeeting.highlights.length === 0) && selectedMeeting.summary && (
+                        <section>
+                          <div className="flex items-center gap-4 mb-8"><FileText className="w-5 h-5 text-terracotta" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-terracotta">會議總結</h4></div>
+                          <div className="bg-white p-12 rounded-[40px] border border-wood/10 shadow-sm"><div className="markdown-body"><ReactMarkdown>{selectedMeeting.summary}</ReactMarkdown></div></div>
+                        </section>
+                      )}
                     </div>
                   )}
                   {selectedMeeting.transcript && (
                     <section>
-                      <div className="flex items-center gap-4 mb-8"><History className="w-5 h-5 text-wood" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-wood">{selectedMeeting.summary?'精華逐字稿':'完整逐字稿'}</h4></div>
+                      <div className="flex items-center justify-between mb-8">
+                        <div className="flex items-center gap-4"><History className="w-5 h-5 text-wood" /><h4 className="font-bold uppercase text-[10px] tracking-[0.3em] text-wood">{selectedMeeting.summary?'精華逐字稿':'完整逐字稿'}</h4></div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => copyTranscript(selectedMeeting.transcript!, selectedMeeting.id + '-desktop')}
+                            className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-wood/10 bg-white hover:bg-paper text-wood/70 hover:text-forest text-xs font-bold uppercase tracking-wider transition-all"
+                          >
+                            {copiedId === selectedMeeting.id + '-desktop' ? <><Check className="w-3.5 h-3.5 text-sage" />已複製</> : <><Copy className="w-3.5 h-3.5" />複製</>}
+                          </button>
+                          <button
+                            onClick={() => downloadTranscript(selectedMeeting.transcript!, selectedMeeting.title)}
+                            className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-wood/10 bg-white hover:bg-paper text-wood/70 hover:text-forest text-xs font-bold uppercase tracking-wider transition-all"
+                          >
+                            <Download className="w-3.5 h-3.5" />下載 .txt
+                          </button>
+                        </div>
+                      </div>
                       <div className="bg-white p-12 rounded-[40px] border border-wood/10"><div className="whitespace-pre-wrap text-forest/80 leading-relaxed text-base font-serif">{selectedMeeting.transcript}</div></div>
                     </section>
                   )}

@@ -56,10 +56,12 @@ export function getBackendStatus(): { whisper: boolean; gpt4o: boolean; gemini: 
 }
 
 export interface TranscriptionResult {
-  transcript: string;
-  rawTranscript?: string;
-  summary?: string;
-  actionItems?: string[];
+  transcript: string;       // 適度整理的逐字稿（去除口頭禪，保留所有內容）
+  rawTranscript?: string;   // 原始未處理文字
+  highlights?: { topic: string; points: string[] }[]; // 主題分組重點
+  decisions?: string[];     // 本次明確決議
+  actionItems?: string[];   // 行動項目（誰做什麼）
+  summary?: string;         // 相容舊欄位，存放格式化後的完整分析文字
   modelInfo?: string;
 }
 
@@ -115,7 +117,7 @@ async function rawTranscribeWithWhisper(
 
   const base64 = await blobToBase64(audioBlob);
   const gemRes = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-1.5-flash',
     contents: {
       parts: [
         { inlineData: { mimeType: sanitizedMime, data: base64 } },
@@ -138,10 +140,9 @@ ${contextHint ? `Context: ${contextHint}` : ''}`,
 // ─── Step 1b: GPT-4o diarization ─────────────────────────────────────────────
 /**
  * Takes Whisper raw text and uses GPT-4o to:
- * - Infer speaker boundaries (A, B, C…) from conversational cues
+ * - Infer speaker ROLES (主持人、報告者、與會者A…) from conversational cues
  * - Insert estimated timestamps [HH:mm:ss] starting from chunkOffset
- *
- * This is the correct architecture for Whisper-based speaker diarization.
+ * - Light cleanup: remove filler words (嗯、啊、就是說) but preserve all content
  */
 async function diarizeWithGPT4o(
   rawText: string,
@@ -165,22 +166,32 @@ async function diarizeWithGPT4o(
       messages: [
         {
           role: 'system',
-          content: `你是一位專業會議轉錄後處理專家。
+          content: `你是一位專業會議逐字稿整理專家。
 
-任務：將 Whisper 輸出的純文字，重新整理成帶有「說話者標籤」和「時間戳記」的格式。
+任務：將 Whisper 輸出的純文字整理成帶有「說話者角色」和「時間戳記」的逐字稿。
 
-規則：
-1. 根據對話內容、語氣轉換、主題切換推斷說話者切換點，標記為 A、B、C...（最多 6 人）
-2. 時間戳記從 ${startLabel} 開始，依對話節奏推估各句時間（格式：[HH:mm:ss]）
-3. 保持原始語言，不翻譯。中文使用繁體中文。
-4. 若文字太短或是噪音描述，返回空字串。
-5. 只輸出格式化後的對話，不加任何說明。
-${contextHint ? `\n會議背景：${contextHint}` : ''}
+說話者角色判斷規則：
+- 根據說話內容、語氣、職責推斷角色，優先使用以下標籤：
+  主持人（主導議程、宣布開始結束、點名發言）
+  報告者（報告進度、呈現資料）
+  提問者（主要在問問題）
+  與會者A / 與會者B / 與會者C（其他發言者，依出現順序命名）
+- 同一人在整份逐字稿中必須使用同一個標籤，不可改變
+- 若只有一位說話者，全部標記為「講者」
+${contextHint ? `- 會議背景：${contextHint}，可用來輔助判斷角色` : ''}
 
-輸出格式範例：
-A: [00:00:02] 大家好，今天的會議開始。
-B: [00:00:06] 好的，先來報告上週進度。
-A: [00:00:15] 謝謝，有問題嗎？`,
+整理規則：
+1. 時間戳記從 ${startLabel} 開始，依對話節奏推估（格式：[HH:mm:ss]）
+2. 去除口頭禪（嗯、啊、呃、就是說、那個那個）但保留所有實質內容
+3. 保持原始語言，不翻譯，不改寫句意。中文使用繁體中文。
+4. 若文字過短或是噪音，返回空字串
+5. 只輸出格式化後的逐字稿，不加任何說明
+
+輸出格式：
+主持人: [00:00:02] 大家好，今天主要討論 Q3 預算規劃。
+報告者: [00:00:08] 好的，這邊我先報告上週的執行狀況。
+與會者A: [00:00:45] 請問這個數字是含稅的嗎？
+報告者: [00:00:49] 對，這邊是含稅金額。`,
         },
         {
           role: 'user',
@@ -193,7 +204,7 @@ A: [00:00:15] 謝謝，有問題嗎？`,
     return result;
   } catch (err) {
     console.error(`[GPT-4o diarize] chunk ${chunkIndex} error:`, err);
-    return rawText; // never lose data
+    return rawText;
   }
 }
 
@@ -257,39 +268,92 @@ export async function analyzeTranscript(
 ): Promise<TranscriptionResult> {
   const openai = await getOpenAI();
 
+  const MAX_TRANSCRIPT_CHARS = 80000;
+  const trimmedTranscript = transcript.length > MAX_TRANSCRIPT_CHARS
+    ? transcript.slice(0, MAX_TRANSCRIPT_CHARS) + '\n\n[...逐字稿過長，已截取前段進行分析]'
+    : transcript;
+
+  const systemPrompt = `你是一位專業的會議記錄整理師。
+${contextHint ? `本次會議背景：${contextHint}。` : ''}
+
+你的工作原則：
+1. 【忠實原文】所有輸出內容必須直接來自逐字稿，不推測、不創造、不補充沒說過的話
+2. 【適度整理逐字稿】去除口頭禪（嗯、啊、呃、就是說）和明顯重複，但保留每個人說過的所有實質內容與原始措辭
+3. 【主題分組】將對話依照討論主題自然分組，每組列出該主題下的具體重點（直接引用或接近原文）
+4. 【決議與行動】只記錄明確說出的決定和承諾，不推斷`;
+
+  const userPrompt = `請整理以下會議逐字稿：
+
+${trimmedTranscript}
+
+請以 JSON 格式返回（不含 markdown 代碼框）：
+{
+  "transcript": "適度整理後的逐字稿（去除口頭禪，保留說話者角色標籤和時間戳記，保留所有實質內容）",
+  "highlights": [
+    {
+      "topic": "討論主題名稱（從對話中提取，不要自己命名）",
+      "points": [
+        "重點一（接近原文，說明是誰說的）",
+        "重點二",
+        "重點三"
+      ]
+    }
+  ],
+  "decisions": [
+    "明確決議一（逐字稿中有明確說出的決定）"
+  ],
+  "actionItems": [
+    "誰 → 做什麼（截止日期，若有提及）"
+  ]
+}
+
+注意：
+- highlights 的 points 直接從逐字稿擷取，不要改寫成摘要句
+- decisions 只填有明確說「決定」、「確定」、「就這樣」的內容
+- 若沒有明確決議或行動項目，對應陣列留空 []`;
+
   if (openaiApiKey && openai) {
     try {
       const res = await openai.chat.completions.create({
         model: 'gpt-4o',
-        temperature: 0.3,
+        temperature: 0.1,  // 低溫度確保忠實，不要自由發揮
+        max_tokens: 4096,
         messages: [
-          {
-            role: 'system',
-            content: `你是一位專業且極具洞察力的會議秘書。${contextHint ? `\n會議背景：${contextHint}。` : ''}
-
-核心原則：
-1. 嚴禁虛構任何內容。所有分析必須忠實反映逐字稿。
-2. 修飾逐字稿時保留說話者標籤（A、B、C）和原始時間戳記（[HH:mm:ss]），絕對不要替換成文字。
-3. 保持原始語言，中文使用繁體中文。
-4. 若逐字稿內容不足，在 summary 中說明「音訊內容不足以生成完整分析」。`,
-          },
-          {
-            role: 'user',
-            content: `請分析以下會議逐字稿：
-
-${transcript}
-
-以 JSON 格式返回（不要包含 markdown 代碼框）：
-{
-  "transcript": "修飾後的精華逐字稿（保留說話者標籤和時間戳記）",
-  "summary": "## 會議摘要\\n\\n深度分析（Markdown 格式）",
-  "actionItems": ["具體行動項目 1", "具體行動項目 2"]
-}`,
-          },
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
         ],
         response_format: { type: 'json_object' },
       });
-      const parsed = JSON.parse(res.choices[0].message.content ?? '{}');
+
+      const raw = res.choices[0].message.content ?? '{}';
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        console.warn('[GPT-4o analyze] JSON parse failed, using fallback');
+        parsed = {
+          transcript: trimmedTranscript,
+          highlights: [{ topic: '（解析失敗）', points: ['請重新生成'] }],
+          decisions: [],
+          actionItems: [],
+        };
+      }
+
+      // Build summary field for backward compatibility with UI rendering
+      const summaryLines: string[] = [];
+      if (parsed.highlights?.length) {
+        for (const h of parsed.highlights) {
+          summaryLines.push(`## ${h.topic}`);
+          for (const p of h.points ?? []) summaryLines.push(`- ${p}`);
+          summaryLines.push('');
+        }
+      }
+      if (parsed.decisions?.length) {
+        summaryLines.push('## 決議事項');
+        for (const d of parsed.decisions) summaryLines.push(`- ${d}`);
+      }
+      parsed.summary = summaryLines.join('\n').trim();
+
       return { ...parsed, rawTranscript: transcript, modelInfo: 'GPT-4o' };
     } catch (err) {
       console.error('[GPT-4o analyze] error:', err);
@@ -298,24 +362,39 @@ ${transcript}
 
   // Gemini fallback
   const ai = getGemini();
-  if (!ai) throw new Error('沒有可用的 API 金鑰');
+  if (!ai) throw new Error('沒有可用的 API 金鑰（OpenAI / Gemini 均未設定）');
 
   const res = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
-    contents: `分析以下會議逐字稿：
-${contextHint ? `會議背景：${contextHint}\n` : ''}
-${transcript}
-
-嚴禁虛構。保留說話者標籤與時間戳記。以繁體中文撰寫分析。
-
-以 JSON 格式返回（不含代碼框）：
-{
-  "transcript": "修飾後的精華逐字稿",
-  "summary": "## 會議摘要\\n\\n...",
-  "actionItems": ["項目 1", "項目 2"]
-}`,
+    model: 'gemini-1.5-flash',
+    contents: `${systemPrompt}\n\n${userPrompt}`,
     config: { responseMimeType: 'application/json' },
   });
-  const parsed = JSON.parse(res.text ?? '{}');
+
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(res.text ?? '{}');
+  } catch {
+    parsed = {
+      transcript: trimmedTranscript,
+      highlights: [{ topic: '（解析失敗）', points: ['請重新生成'] }],
+      decisions: [],
+      actionItems: [],
+    };
+  }
+
+  const summaryLines: string[] = [];
+  if (parsed.highlights?.length) {
+    for (const h of parsed.highlights) {
+      summaryLines.push(`## ${h.topic}`);
+      for (const p of h.points ?? []) summaryLines.push(`- ${p}`);
+      summaryLines.push('');
+    }
+  }
+  if (parsed.decisions?.length) {
+    summaryLines.push('## 決議事項');
+    for (const d of parsed.decisions) summaryLines.push(`- ${d}`);
+  }
+  parsed.summary = summaryLines.join('\n').trim();
+
   return { ...parsed, rawTranscript: transcript, modelInfo: 'Gemini' };
 }

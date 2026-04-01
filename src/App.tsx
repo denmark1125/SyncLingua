@@ -31,6 +31,37 @@ function cn(...inputs: ClassValue[]) { return twMerge(clsx(inputs)); }
 
 const CHUNK_INTERVAL_MS = 3 * 60 * 1000;
 
+/** Correctly format seconds → HH:mm:ss or mm:ss (no date-fns overflow bug) */
+function formatDuration(totalSeconds: number): string {
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(s).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/**
+ * Detect best supported audio mimeType for this browser/device.
+ * iOS Safari ONLY supports audio/mp4 — audio/webm will throw NotSupportedError.
+ * Returns '' to use browser default if nothing explicit matches.
+ */
+function getSupportedMimeType(): string {
+  const candidates = [
+    'audio/webm;codecs=opus',   // Chrome/Firefox desktop — best quality
+    'audio/webm',               // Chrome/Firefox desktop fallback
+    'audio/mp4;codecs=aac',     // iOS Safari
+    'audio/mp4',                // iOS Safari fallback
+    'audio/ogg;codecs=opus',    // Firefox
+  ];
+  for (const type of candidates) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(type)) {
+      return type;
+    }
+  }
+  return ''; // Let browser choose default (safe fallback)
+}
+
 interface Meeting {
   id: string; userId: string; title: string; date: Timestamp;
   duration?: number; transcript?: string; rawTranscript?: string;
@@ -111,6 +142,7 @@ export default function App() {
   const chunkIndexRef = useRef(0);
   const isRecordingRef = useRef(false);
   useEffect(() => { isRecordingRef.current = isRecording; }, [isRecording]);
+  const visibilityHandlerRef = useRef<(() => void) | null>(null);
   /**
    * isFinalRef is set to true SYNCHRONOUSLY inside stopRecording() BEFORE
    * mediaRecorder.stop() is called, so the onstop closure always reads the
@@ -163,10 +195,17 @@ export default function App() {
 
   // Flush chunk
   const flushChunk = useCallback(async (chunks: Blob[], idx: number, mime: string, isFinal: boolean) => {
-    if (!chunks.length) return;
-    const blob = new Blob(chunks, { type: mime });
-    if (blob.size > WHISPER_SAFE_SIZE_BYTES) console.warn(`Chunk ${idx} > 24MB`);
+    if (!chunks.length) {
+      console.warn(`[chunk ${idx}] Empty chunks, skipping`);
+      chunkTranscriptsRef.current[idx] = '';
+      if (isFinal) { setIsTranscribingChunk(false); setIsProcessing(false); }
+      return;
+    }
+
+    const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+    console.log(`[chunk ${idx}] flushing ${(blob.size/1024).toFixed(0)}KB, isFinal=${isFinal}`);
     setIsTranscribingChunk(true);
+
     try {
       const { transcript, modelInfo } = await transcribeChunk(blob, idx, contextHint, CHUNK_INTERVAL_MS / 1000);
       transcribeModelRef.current = modelInfo;
@@ -176,88 +215,202 @@ export default function App() {
       setChunksProcessed(p => p + 1);
       if (currentMeetingIdRef.current) {
         await updateDoc(doc(db, 'meetings', currentMeetingIdRef.current), {
-          rawTranscript: full, transcript: full, modelInfo, status: isFinal ? 'completed' : 'recording'
+          rawTranscript: full, transcript: full, modelInfo,
+          status: isFinal ? 'completed' : 'recording'
         });
       }
       if (isFinal) {
         setSelectedMeeting(p => p ? { ...p, rawTranscript: full, transcript: full, modelInfo, status: 'completed' } : null);
-        setIsTranscribingChunk(false); setIsProcessing(false);
       }
+      setIsTranscribingChunk(false);
+      if (isFinal) setIsProcessing(false);
     } catch (e) {
-      console.error(`Chunk ${idx} error:`, e);
+      console.error(`[chunk ${idx}] error:`, e);
+      chunkTranscriptsRef.current[idx] = chunkTranscriptsRef.current[idx] ?? '';
+      setIsTranscribingChunk(false);
       if (isFinal) {
-        if (currentMeetingIdRef.current) await updateDoc(doc(db,'meetings',currentMeetingIdRef.current), { status: 'error', transcript: '轉錄發生錯誤，請稍後再試。' });
-        setIsTranscribingChunk(false); setIsProcessing(false);
+        const partial = mergeChunkTranscripts(chunkTranscriptsRef.current);
+        if (currentMeetingIdRef.current) {
+          await updateDoc(doc(db, 'meetings', currentMeetingIdRef.current), {
+            rawTranscript: partial || '（轉錄失敗）',
+            transcript: partial || '（轉錄失敗）',
+            status: partial ? 'completed' : 'error',
+            modelInfo: '（部分轉錄）'
+          });
+          if (partial) setSelectedMeeting(p => p ? { ...p, rawTranscript: partial, transcript: partial, status: 'completed' } : null);
+        }
+        setIsProcessing(false);
       }
     }
   }, [contextHint]);
 
   const startRecording = async () => {
+    if (isRecordingRef.current) { console.warn('[startRecording] Already recording'); return; }
+
     try {
-      chunkTranscriptsRef.current = []; chunkIndexRef.current = 0;
-      setLiveTranscript(''); setChunksProcessed(0);
-      transcribeModelRef.current = ''; currentMeetingIdRef.current = '';
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      // Reset all state
+      chunkTranscriptsRef.current = [];
+      chunkIndexRef.current = 0;
+      isFinalRef.current = false;
+      setLiveTranscript('');
+      setChunksProcessed(0);
+      setIsTranscribingChunk(false);
+      transcribeModelRef.current = '';
+      currentMeetingIdRef.current = '';
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
       streamRef.current = stream;
-      const ac = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const src = ac.createMediaStreamSource(stream);
-      const an = ac.createAnalyser(); an.fftSize = 256; src.connect(an);
-      audioContextRef.current = ac; analyserRef.current = an;
-      const buf = new Uint8Array(an.frequencyBinCount);
-      const tick = () => { if (!analyserRef.current) return; analyserRef.current.getByteFrequencyData(buf); setAudioVolume(buf.reduce((a,b)=>a+b,0)/buf.length); animationFrameRef.current = requestAnimationFrame(tick); };
-      tick();
-      mimeTypeRef.current = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm';
-      setIsRecording(true);
-      if (user) {
-        const data: Omit<Meeting,'id'> = { userId: user.uid, title: `${format(new Date(),'yyyy年MM月dd日 HH:mm')} 的錄音`, date: Timestamp.now(), contextHint, status: 'recording' };
-        const ref = await addDoc(collection(db,'meetings'), data);
-        currentMeetingIdRef.current = ref.id;
-        setSelectedMeeting({ ...data, id: ref.id });
-      }
-      isFinalRef.current = false; // reset at start of every session
-      const mime = mimeTypeRef.current;
-      const launch = () => {
-        const idx = chunkIndexRef.current;
-        const rec = new MediaRecorder(stream, { mimeType: mime });
-        mediaRecorderRef.current = rec;
-        const local: Blob[] = [];
-        rec.ondataavailable = e => { if (e.data.size > 0) local.push(e.data); };
-        rec.onstop = () => {
-          // isFinalRef.current is set SYNCHRONOUSLY inside stopRecording() before
-          // rec.stop() is called, so this always reads the correct intent.
-          flushChunk(local, idx, mime, isFinalRef.current);
+
+      // Volume monitoring (non-critical)
+      try {
+        const ac = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const src = ac.createMediaStreamSource(stream);
+        const an = ac.createAnalyser(); an.fftSize = 256; src.connect(an);
+        audioContextRef.current = ac; analyserRef.current = an;
+        const buf = new Uint8Array(an.frequencyBinCount);
+        const tick = () => {
+          if (!analyserRef.current) return;
+          analyserRef.current.getByteFrequencyData(buf);
+          setAudioVolume(buf.reduce((a, b) => a + b, 0) / buf.length);
+          animationFrameRef.current = requestAnimationFrame(tick);
         };
-        rec.start(1000);
-        chunkTimerRef.current = setTimeout(() => {
-          if (mediaRecorderRef.current?.state === 'recording') {
+        tick();
+      } catch (err) { console.warn('[AudioContext] disabled:', err); }
+
+      // Detect best mimeType (iOS Safari only supports audio/mp4, NOT audio/webm)
+      const detectedMime = getSupportedMimeType();
+      mimeTypeRef.current = detectedMime;
+      console.log(`[Recording] mimeType: "${detectedMime || '(browser default)'}"`);
+
+      // Set ref synchronously BEFORE any async work
+      isRecordingRef.current = true;
+      setIsRecording(true);
+
+      // Create Firestore record (non-blocking on failure)
+      if (user) {
+        const data: Omit<Meeting,'id'> = {
+          userId: user.uid,
+          title: `${format(new Date(),'yyyy年MM月dd日 HH:mm')} 的錄音`,
+          date: Timestamp.now(), contextHint, status: 'recording'
+        };
+        try {
+          const ref = await addDoc(collection(db,'meetings'), data);
+          currentMeetingIdRef.current = ref.id;
+          setSelectedMeeting({ ...data, id: ref.id });
+        } catch (fsErr) {
+          console.error('[Firestore] Failed to create meeting:', fsErr);
+        }
+      }
+
+      // ─── Safe MediaRecorder factory ──────────────────────────────────────
+      const createRecorder = (): MediaRecorder => {
+        const mime = mimeTypeRef.current;
+        try {
+          const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+          return rec;
+        } catch {
+          console.warn(`[MediaRecorder] "${mime}" rejected, using browser default`);
+          mimeTypeRef.current = '';
+          return new MediaRecorder(stream);
+        }
+      };
+
+      // ─── Chunk launcher ──────────────────────────────────────────────────
+      const launchSegment = () => {
+        if (!isRecordingRef.current) return;
+
+        const idx = chunkIndexRef.current;
+        let rec: MediaRecorder;
+        try { rec = createRecorder(); } catch (e) {
+          console.error('[launchSegment] Cannot create MediaRecorder:', e);
+          return;
+        }
+
+        // Read actual mimeType the browser chose
+        const actualMime = rec.mimeType || mimeTypeRef.current;
+        if (rec.mimeType) mimeTypeRef.current = rec.mimeType;
+
+        mediaRecorderRef.current = rec;
+        const localChunks: Blob[] = [];
+
+        rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) localChunks.push(e.data); };
+
+        rec.onerror = (e) => {
+          console.error(`[MediaRecorder] error chunk ${idx}:`, e);
+          if (isRecordingRef.current) stopRecording();
+        };
+
+        rec.onstop = () => {
+          const isFinal = isFinalRef.current;
+          flushChunk(localChunks, idx, actualMime, isFinal);
+          if (!isFinal && isRecordingRef.current) {
             chunkIndexRef.current += 1;
-            // isFinalRef stays false for auto-rotation chunks
+            launchSegment();
+          }
+        };
+
+        try {
+          rec.start(1000);
+          console.log(`[chunk ${idx}] started`);
+        } catch (e) {
+          console.error(`[chunk ${idx}] start failed:`, e);
+          return;
+        }
+
+        chunkTimerRef.current = setTimeout(() => {
+          if (mediaRecorderRef.current === rec && rec.state === 'recording' && isRecordingRef.current) {
             rec.stop();
-            setTimeout(launch, 150); // small gap to let onstop fire first
           }
         }, CHUNK_INTERVAL_MS);
       };
-      launch();
-    } catch (e) { console.error(e); alert('無法存取麥克風，請檢查權限。'); }
+
+      launchSegment();
+
+      // ─── iOS screen lock recovery ────────────────────────────────────────
+      const handleVisibilityChange = () => {
+        if (document.visibilityState !== 'visible' || !isRecordingRef.current) return;
+        const rec = mediaRecorderRef.current;
+        if (!rec || rec.state === 'inactive') {
+          console.warn('[Visibility] Recorder died in background, restarting');
+          chunkIndexRef.current += 1;
+          launchSegment();
+        }
+      };
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      visibilityHandlerRef.current = handleVisibilityChange;
+
+    } catch (e) {
+      console.error('[startRecording]', e);
+      isRecordingRef.current = false;
+      setIsRecording(false);
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`無法開始錄音：${msg}`);
+    }
   };
 
   const stopRecording = () => {
-    if (!isRecording) return;
-    // Cancel auto-rotation timer
+    if (!isRecordingRef.current) return;
     if (chunkTimerRef.current) { clearTimeout(chunkTimerRef.current); chunkTimerRef.current = null; }
-    // Stop volume monitoring
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    if (audioContextRef.current) audioContextRef.current.close();
+    try { audioContextRef.current?.close(); } catch {}
     setAudioVolume(0);
-    // CRITICAL: set isFinalRef BEFORE calling rec.stop(), so that the onstop
-    // closure which fires synchronously (or near-synchronously) sees isFinal=true.
+    if (visibilityHandlerRef.current) {
+      document.removeEventListener('visibilitychange', visibilityHandlerRef.current);
+      visibilityHandlerRef.current = null;
+    }
     isFinalRef.current = true;
-    setIsRecording(false);
     isRecordingRef.current = false;
+    setIsRecording(false);
     setIsProcessing(true);
-    // Trigger final flush
-    if (mediaRecorderRef.current?.state === 'recording') mediaRecorderRef.current.stop();
-    // Release mic
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state === 'recording') {
+      rec.stop();
+    } else {
+      console.warn('[stopRecording] Recorder already stopped, finalizing');
+      setIsProcessing(false);
+    }
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
   };
@@ -571,7 +724,7 @@ export default function App() {
                 ? <motion.div animate={{ scale:[1,1.2,1] }} transition={{ repeat: Infinity, duration: 1.5 }}><StopCircle className="w-6 h-6" /></motion.div>
                 : <Mic className="w-6 h-6" />}
               <span className="text-xs uppercase tracking-widest font-bold">
-                {isRecording ? `錄音中 ${format(recordingTime*1000,'mm:ss')}` : '啟動新會議錄製'}
+                {isRecording ? `錄音中 ${formatDuration(recordingTime)}` : '啟動新會議錄製'}
               </span>
               {isRecording && chunksProcessed > 0 && (
                 <span className="text-[9px] text-white/60 flex items-center gap-1">
@@ -826,7 +979,7 @@ export default function App() {
                 className="flex items-center gap-1.5 px-3 py-1 bg-terracotta/10 rounded-full"
               >
                 <div className="w-2 h-2 rounded-full bg-terracotta" />
-                <span className="text-[11px] font-bold text-terracotta uppercase tracking-wider">{format(recordingTime*1000,'mm:ss')}</span>
+                <span className="text-[11px] font-bold text-terracotta uppercase tracking-wider">{formatDuration(recordingTime)}</span>
               </motion.div>
             )}
           </div>
@@ -852,12 +1005,16 @@ export default function App() {
                       {/* Timer */}
                       <div className="text-center">
                         <div className="text-7xl font-serif font-bold text-white tracking-tighter tabular-nums leading-none">
-                          {format(recordingTime*1000,'mm:ss')}
+                          {formatDuration(recordingTime)}
                         </div>
                         <div className="text-white/40 text-xs uppercase tracking-[0.3em] mt-3 font-bold">正在錄音</div>
                       </div>
                       {/* Waveform */}
                       <Waveform volume={audioVolume} active={isRecording} />
+                      {/* iOS warning: keep screen on */}
+                      <div className="flex items-center gap-2 px-4 py-2 bg-yellow-400/15 border border-yellow-400/25 rounded-full">
+                        <span className="text-yellow-300/80 text-[11px] font-bold">⚠ 請保持螢幕開啟，鎖定螢幕可能中斷錄音</span>
+                      </div>
                       {/* Status badges */}
                       <div className="flex flex-col items-center gap-3">
                         {contextHint && (

@@ -89,11 +89,15 @@ async function rawTranscribeWithWhisper(
   contextHint?: string
 ): Promise<{ rawText: string; usedModel: 'whisper' | 'gemini' }> {
   const sanitizedMime = audioBlob.type.split(';')[0];
+  // Must match extension to actual codec or Whisper will fail to decode
+  const ext = (sanitizedMime.includes('mp4') || sanitizedMime.includes('aac')) ? 'mp4'
+    : sanitizedMime.includes('ogg') ? 'ogg'
+    : 'webm';
   const openai = await getOpenAI();
 
   if (openaiApiKey && openai) {
     try {
-      const file = new File([audioBlob], `chunk_${chunkIndex}.webm`, { type: sanitizedMime });
+      const file = new File([audioBlob], `chunk_${chunkIndex}.${ext}`, { type: sanitizedMime });
       const res = await openai.audio.transcriptions.create({
         file,
         model: 'whisper-1',
